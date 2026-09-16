@@ -18,7 +18,7 @@ WATCH_DRIFT = os.environ.get("WORKBENCH_DRIFT", os.path.join(DATA_DIR, "model_cl
 MANIFEST = os.environ.get("WORKBENCH_MANIFEST", "https://x402.nsgoods.org/proof/index.json")
 PAYABILITY_INDEX = "https://x402.nsgoods.org/ata-audit/payability_index.json"
 FP_STORE = os.environ.get("WORKBENCH_FP_STORE", os.path.join(tempfile.gettempdir(), "nsgoods_fp_limit_workbench.json"))
-FP_LIMIT = 30
+FP_LIMIT = 300
 N_TOOLS = 8
 
 def _ensure_db():

@@ -8,7 +8,7 @@ cost, which host is gone, which endpoints match a keyword, and whether a
 signed nsgoods response verifies offline.
 
 Hosted endpoint: https://mcp.nsgoods.org/mcp (Streamable HTTP, no sign in,
-30 calls per IP per day). Health: https://mcp.nsgoods.org/health
+300 calls per IP per day). Health: https://mcp.nsgoods.org/health
 
 ## Connect from Claude
 1. Settings, then Connectors, then Add custom connector
