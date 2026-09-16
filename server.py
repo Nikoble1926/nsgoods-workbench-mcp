@@ -112,7 +112,7 @@ def _price(resource):
             "price_note": f"first accept of the 402 challenge as observed on {(r['observed_at'] or '')[:10]}; raw amount in atomic units; live price may differ"}
 
 _ensure_db()
-mcp = FastMCP("nsgoods-workbench", host="127.0.0.1", port=4036, streamable_http_path="/mcp")
+mcp = FastMCP("nsgoods-workbench", host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=4036, streamable_http_path="/mcp")
 
 @mcp.tool()
 def payability_verdict(url: str) -> dict:
@@ -350,4 +350,4 @@ app = RateLimit(app)
 
 if __name__=="__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=4036, log_level="warning")
+    uvicorn.run(app, host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=4036, log_level="warning")

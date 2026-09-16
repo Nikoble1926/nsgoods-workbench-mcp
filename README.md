@@ -80,9 +80,18 @@ Docker:
 ```
 docker build -t nsgoods-workbench-mcp . && docker run -p 4036:4036 nsgoods-workbench-mcp
 ```
-Paths are configurable with WORKBENCH_DIR and WORKBENCH_DATA_DIR (both default
-to the current directory). The server creates an empty index on first run if
-none is present, so tools/list works before you load any data.
+Docker image is untested (built without a Docker host). Set WORKBENCH_HOST=0.0.0.0 inside containers. Feedback welcome.
+
+Environment variables:
+
+| var | default | meaning |
+| --- | --- | --- |
+| WORKBENCH_DIR | . | base directory for the index and data files |
+| WORKBENCH_DATA_DIR | WORKBENCH_DIR | directory for scans.jsonl and watch state |
+| WORKBENCH_HOST | 127.0.0.1 | bind address |
+
+The server creates an empty index on first run if none is present, so
+tools/list works before you load any data.
 
 ## Verification
 Signed nsgoods responses use EIP-191 over canonical JSON (sorted keys,
