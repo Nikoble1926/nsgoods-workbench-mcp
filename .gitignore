@@ -1,0 +1,8 @@
+index.sqlite
+*.jsonl
+*.bak-*
+venv/
+__pycache__/
+*.pyc
+.env
+price_sweep.log

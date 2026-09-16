@@ -1,0 +1,16 @@
+[Unit]
+Description=nsgoods Workbench MCP (read-only x402 catalogue, Streamable HTTP 127.0.0.1:4036)
+After=network.target
+
+[Service]
+Type=simple
+User=nsgoods
+WorkingDirectory=/opt/nsgoods-workbench-mcp
+Environment=WORKBENCH_DIR=/opt/nsgoods-workbench-mcp
+Environment=WORKBENCH_DATA_DIR=/opt/nsgoods-workbench-mcp/data
+ExecStart=/opt/nsgoods-workbench-mcp/venv/bin/python /opt/nsgoods-workbench-mcp/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
