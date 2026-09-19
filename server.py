@@ -257,38 +257,69 @@ def drift_status(host: str = "") -> dict:
             "resource_count": d.get("resource_count")})
 
 @mcp.tool()
-def verify_signature(response_json: str) -> dict:
-    """Offline EIP-191 verify of a signed nsgoods response. Strips preview/demo post-sign fields,
-    canonicalises (JCS, trying both ASCII escaping modes), recovers the signer, and checks it against
-    the published manifest signers."""
+def verify_signature(response_json: str, service: str = "") -> dict:
+    """Offline EIP-191 verify of a signed nsgoods response. Identifies the service from the
+    manifest (or the optional `service` arg), strips exactly that service's post-sign fields,
+    canonicalises (JCS, both ASCII modes), recovers the signer and checks it against the
+    published manifest signers. Reproduction-attestation (JCS/byte-length) and envelope
+    (signer/signature, components) shapes are reported as unsupported_shape, not verified here."""
     try:
         d=json.loads(response_json) if isinstance(response_json,str) else dict(response_json)
     except Exception as e:
-        return {"valid": False, "note": f"input is not valid JSON: {e}"}
-    if "signed_by" not in d or "signature" not in d:
-        return {"valid": False, "note": "response has no signed_by/signature pair (envelope-style signer/signature not handled)"}
-    b=dict(d)
-    for k in ("demo_address","demo_note","input_ignored","note","preview"): b.pop(k, None)
-    sig=b.pop("signature"); sb=b.pop("signed_by")
-    man=_manifest(); signers=man.get("signers", {})
-    rec=None; mode="none matched"
-    for ea,label in ((True,"ensure_ascii=True"),(False,"ensure_ascii=False")):
-        msg=json.dumps(b, sort_keys=True, separators=(",",":"), ensure_ascii=ea)
-        try: r=Account.recover_message(encode_defunct(text=msg), signature=sig)
-        except Exception: continue
-        if r.lower()==sb.lower():
-            rec=r; mode=label; break
-        if rec is None: rec=r  # keep last recovered for reporting
-    known = rec is not None and any(rec.lower()==k.lower() for k in signers)
-    valid = (mode!="none matched") and known
-    scopes = None
-    if rec:
-        for k,v in signers.items():
-            if k.lower()==rec.lower(): scopes=v; break
-    return {"valid": bool(valid), "signer": rec, "signed_by_claimed": sb, "scopes": scopes,
-            "in_manifest": bool(known), "canonicalization": mode, "manifest_fetched_at": _mc.get("at"),
-            "note": "recovered signer matches signed_by and is a published manifest signer" if valid
-                    else "signature does not verify against a published manifest signer"}
+        return {"status":"error","valid":False,"note":f"input is not valid JSON: {e}"}
+    man=_manifest(); signers=man.get("signers",{}); at=_mc.get("at")
+    _REQUIRED={"signals":{"signal","pair","timeframe"},"trust":{"result"},
+        "sanctions":{"verdict","sanctioned","sdn_snapshot_at"},
+        "screen-multi":{"any_list_match","list_health","lists"},
+        "payable":{"returns_402","payable_networks","options"},
+        "payable-address":{"classification","transfer_path","proxy_indication"}}
+    _NEGATIVE={"sanctions":{"any_list_match","list_health","lists"}}
+    FLAT={}
+    for s in man.get("services",[]):
+        pv=s.get("preview",{}) or {}; v=pv.get("verify","") or ""
+        if pv.get("preview_signed") and "signed_by" in v and "recover == signed_by" in v:
+            FLAT[s["name"]]={"signer":s["signer"].lower(),"post_sign":pv.get("post_sign_fields",[]) or []}
+    def is_att(x): return isinstance(x,dict) and "payload" in x and "scheme" in x and ("jcs_sha256" in x or "jcs_len" in x)
+    def rec_flat(x,post,sig):
+        body={k:v for k,v in x.items() if k not in set(post)|{"signature","signed_by","_proof"}}
+        for ea,label in ((True,"ensure_ascii=True"),(False,"ensure_ascii=False")):
+            try:
+                msg=json.dumps(body,sort_keys=True,separators=(",",":"),ensure_ascii=ea)
+                return Account.recover_message(encode_defunct(text=msg),signature=sig),label
+            except Exception: continue
+        return None,"none matched"
+    if not isinstance(d,dict):
+        return {"status":"error","valid":False,"note":"input is not a JSON object","manifest_fetched_at":at}
+    if is_att(d):
+        return {"status":"unsupported_shape","valid":False,"checked":False,"signed_by_claimed":d.get("signed_by"),
+                "manifest_fetched_at":at,"note":"reproduction attestation (RFC8785/JCS with byte-length prefix over the payload sub-object); not checked by this tool. Verify with the scheme in the manifest reproduction_attestations."}
+    if ("components" in d and "envelope" in d) or "component_signature" in d:
+        return {"status":"unsupported_shape","valid":False,"checked":False,"manifest_fetched_at":at,
+                "note":"preflight composite (components + envelope) shape; not checked by this tool."}
+    if "signer" in d and "signed_by" not in d:
+        return {"status":"unsupported_shape","valid":False,"checked":False,"signer_claimed":d.get("signer"),
+                "manifest_fetched_at":at,"note":"envelope signer/signature shape (settle/watchdog); not checked by this tool."}
+    if "signature" not in d or "signed_by" not in d:
+        return {"status":"invalid","valid":False,"checked":True,"manifest_fetched_at":at,"note":"response has no signed_by/signature pair"}
+    sb=d["signed_by"]; sig=d["signature"]; slc={k.lower() for k in signers}
+    if service:
+        cands={service:FLAT[service]} if service in FLAT else {}
+        if not cands:
+            return {"status":"invalid","valid":False,"checked":True,"signed_by_claimed":sb,"manifest_fetched_at":at,"note":f"unknown or non-flat service '{service}'"}
+    else:
+        cands={n:i for n,i in FLAT.items() if i["signer"]==sb.lower()}
+    for name,info in cands.items():
+        if not service:
+            if not _REQUIRED.get(name,set()).issubset(d.keys()): continue
+            if name in _NEGATIVE and (_NEGATIVE[name] & set(d.keys())): continue
+        rec,mode=rec_flat(d,info["post_sign"],sig)
+        if rec and rec.lower()==sb.lower() and sb.lower() in slc:
+            scopes=next((v for k,v in signers.items() if k.lower()==rec.lower()),None)
+            return {"status":"valid","valid":True,"checked":True,"service":name,"signer":rec,"signed_by_claimed":sb,
+                    "scopes":scopes,"in_manifest":True,"canonicalization":mode,"post_sign_stripped":info["post_sign"],
+                    "manifest_fetched_at":at,"note":"recovered signer matches signed_by under this service's post-sign recipe and is a published manifest signer"}
+    return {"status":"invalid","valid":False,"checked":True,"signer":None,"signed_by_claimed":sb,
+            "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,"note":"no service of this signer verifies this body under its post-sign recipe"}
 
 @mcp.tool()
 def reports() -> dict:
