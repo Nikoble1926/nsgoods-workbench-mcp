@@ -292,6 +292,34 @@ def verify_signature(response_json: str, service: str = "") -> dict:
                 return Account.recover_message(encode_defunct(text=msg),signature=sig),label
             except Exception: continue
         return None,"none matched"
+    _ROOT="0x57fF0F084Cba33e6761503f90eEF0Da9F159350c"
+    def _anchor(signer,service):
+        # B10 part B: anchor a valid flat signature to the cross-signing root.
+        # The root itself is self-asserted until its own on-chain anchor (part A).
+        if signer.lower()==_ROOT.lower():
+            return {"via":"self_asserted","root":_ROOT,"onchain":False}
+        auth=man.get("signer_authorizations")
+        if not isinstance(auth,dict):
+            return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":"no signer_authorizations in manifest"}
+        try:
+            abody={k:v for k,v in auth.items() if k!="signature"}
+            amsg=json.dumps(abody,sort_keys=True,separators=(",",":"),ensure_ascii=True)
+            arec=Account.recover_message(encode_defunct(text=amsg),signature=auth.get("signature",""))
+        except Exception as e:
+            return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":f"authorization signature does not recover: {e}"}
+        if arec.lower()!=_ROOT.lower() or (auth.get("root","") or "").lower()!=_ROOT.lower():
+            return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":"authorization not signed by root"}
+        now=datetime.now(timezone.utc)
+        for e in auth.get("authorizes",[]) or []:
+            if (e.get("address","") or "").lower()!=signer.lower(): continue
+            if service not in (e.get("services") or []): continue
+            vf=e.get("valid_from"); vu=e.get("valid_until")
+            try:
+                if vf and datetime.fromisoformat(vf.replace("Z","+00:00"))>now: continue
+                if vu and datetime.fromisoformat(vu.replace("Z","+00:00"))<=now: continue
+            except Exception: continue
+            return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":True}
+        return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":"no valid authorization entry for this signer and service"}
     if not isinstance(d,dict):
         return {"status":"error","valid":False,"note":"input is not a JSON object","manifest_fetched_at":at}
     if is_att(d):
@@ -323,6 +351,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             scopes=next((v for k,v in signers.items() if k.lower()==rec.lower()),None)
             return {"status":"valid","valid":True,"checked":True,"service":name,"signer":rec,"signed_by_claimed":sb,
                     "scopes":scopes,"in_manifest":True,"canonicalization":mode,"post_sign_stripped":info["post_sign"],
+                    "anchor":_anchor(rec,name),
                     "manifest_fetched_at":at,"note":"recovered signer matches signed_by under this service's post-sign recipe and is a published manifest signer"}
     return {"status":"signature_mismatch","valid":False,"checked":True,"signer":None,"signed_by_claimed":sb,
             "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,
