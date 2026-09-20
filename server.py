@@ -262,7 +262,11 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     manifest (or the optional `service` arg), strips exactly that service's post-sign fields,
     canonicalises (JCS, both ASCII modes), recovers the signer and checks it against the
     published manifest signers. Reproduction-attestation (JCS/byte-length) and envelope
-    (signer/signature, components) shapes are reported as unsupported_shape, not verified here."""
+    (signer/signature, components) shapes are reported as unsupported_shape, not verified here.
+    Refusals carry a distinct status: malformed_signature (signature is not a 65-byte 0x-prefixed
+    hex string), signature_mismatch (well-formed but recovers a different address than signed_by
+    under every candidate service recipe of this signer), unsupported_shape, or the
+    no-signed_by/signature-pair case."""
     try:
         d=json.loads(response_json) if isinstance(response_json,str) else dict(response_json)
     except Exception as e:
@@ -302,6 +306,9 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     if "signature" not in d or "signed_by" not in d:
         return {"status":"invalid","valid":False,"checked":True,"manifest_fetched_at":at,"note":"response has no signed_by/signature pair"}
     sb=d["signed_by"]; sig=d["signature"]; slc={k.lower() for k in signers}
+    if not (isinstance(sig,str) and sig[:2]=="0x" and len(sig)==132 and all(c in "0123456789abcdefABCDEF" for c in sig[2:])):
+        return {"status":"malformed_signature","valid":False,"checked":False,"signed_by_claimed":sb,
+                "manifest_fetched_at":at,"note":"signature is not a 65-byte 0x-prefixed hex string; cannot recover a signer"}
     if service:
         cands={service:FLAT[service]} if service in FLAT else {}
         if not cands:
@@ -317,8 +324,9 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             return {"status":"valid","valid":True,"checked":True,"service":name,"signer":rec,"signed_by_claimed":sb,
                     "scopes":scopes,"in_manifest":True,"canonicalization":mode,"post_sign_stripped":info["post_sign"],
                     "manifest_fetched_at":at,"note":"recovered signer matches signed_by under this service's post-sign recipe and is a published manifest signer"}
-    return {"status":"invalid","valid":False,"checked":True,"signer":None,"signed_by_claimed":sb,
-            "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,"note":"no service of this signer verifies this body under its post-sign recipe"}
+    return {"status":"signature_mismatch","valid":False,"checked":True,"signer":None,"signed_by_claimed":sb,
+            "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,
+            "note":"signature is well-formed but recovers a different address than signed_by under every candidate service recipe of this signer; the body may be altered or signed for a different service"}
 
 @mcp.tool()
 def reports() -> dict:
