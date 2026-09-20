@@ -309,9 +309,8 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     else:
         cands={n:i for n,i in FLAT.items() if i["signer"]==sb.lower()}
     for name,info in cands.items():
-        if not service:
-            if not _REQUIRED.get(name,set()).issubset(d.keys()): continue
-            if name in _NEGATIVE and (_NEGATIVE[name] & set(d.keys())): continue
+        if not _REQUIRED.get(name,set()).issubset(d.keys()): continue
+        if name in _NEGATIVE and (_NEGATIVE[name] & set(d.keys())): continue
         rec,mode=rec_flat(d,info["post_sign"],sig)
         if rec and rec.lower()==sb.lower() and sb.lower() in slc:
             scopes=next((v for k,v in signers.items() if k.lower()==rec.lower()),None)
