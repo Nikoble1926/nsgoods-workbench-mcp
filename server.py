@@ -61,6 +61,31 @@ def _manifest():
     _mc["at"]=datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return _mc["d"]
 
+# ---- B10 part A: on-chain root anchor check (ERC-8004 Identity Registry, Base) ----
+_ANCHOR_REG="0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+_ANCHOR_AGENTID=95272
+_ANCHOR_ROOT="0x57fF0F084Cba33e6761503f90eEF0Da9F159350c"
+_ANCHOR_RPCS=["https://base.gateway.tenderly.co","https://base.drpc.org"]
+_anchor_mc={"t":0,"ttl":0,"v":None}   # cache: v in {True, False, "unverified_rpc_error"}
+def _onchain_owner_ok():
+    """eth_call ownerOf(95272) == root, cached (10 min on success, 60s on RPC error).
+    Returns True / False / 'unverified_rpc_error'. Never raises."""
+    if _anchor_mc["v"] is not None and time.time()-_anchor_mc["t"] < _anchor_mc["ttl"]:
+        return _anchor_mc["v"]
+    data="0x6352211e"+format(_ANCHOR_AGENTID,"064x")   # ownerOf(uint256)
+    body=json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":_ANCHOR_REG,"data":data},"latest"]}).encode()
+    for rpc in _ANCHOR_RPCS:
+        try:
+            r=json.loads(urllib.request.urlopen(urllib.request.Request(rpc,data=body,headers={"content-type":"application/json"}),timeout=8).read())
+            res=r.get("result")
+            if res and len(res)>=66:
+                v=("0x"+res[-40:]).lower()==_ANCHOR_ROOT.lower()
+                _anchor_mc.update(t=time.time(),ttl=600,v=v); return v
+        except Exception:
+            continue
+    _anchor_mc.update(t=time.time(),ttl=60,v="unverified_rpc_error")
+    return "unverified_rpc_error"
+
 # ---- rate limit (per IP, daily) ----
 def rate_ok(ip):
     today=datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -297,7 +322,13 @@ def verify_signature(response_json: str, service: str = "") -> dict:
         # B10 part B: anchor a valid flat signature to the cross-signing root.
         # The root itself is self-asserted until its own on-chain anchor (part A).
         if signer.lower()==_ROOT.lower():
-            return {"via":"self_asserted","root":_ROOT,"onchain":False}
+            oc=_onchain_owner_ok()
+            base={"via":"onchain","root":_ROOT,"registry":_ANCHOR_REG,"chain":"eip155:8453","agentId":_ANCHOR_AGENTID}
+            if oc is True:
+                return {**base,"onchain":True}
+            if oc=="unverified_rpc_error":
+                return {**base,"onchain":"unverified_rpc_error"}
+            return {**base,"onchain":False,"reason":"ownerOf(agentId) does not match root"}
         auth=man.get("signer_authorizations")
         if not isinstance(auth,dict):
             return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":"no signer_authorizations in manifest"}
