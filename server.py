@@ -293,7 +293,11 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     field shape for every service the claimed signer covers; recovery was not attempted, checked is
     false, reasons lists the failed candidates), signature_mismatch (well-formed but recovers a
     different address than signed_by under every candidate service recipe of this signer),
-    unsupported_shape, or the no-signed_by/signature-pair case."""
+    no_flat_recipe (signed_by is a manifest signer but every service it covers uses an envelope shape,
+    so there is no flat recipe to check; recovery was not attempted, checked is false),
+    unknown_signer (signed_by is not a manifest signer; recovery was not attempted, checked is false),
+    unsupported_shape, or the no-signed_by/signature-pair case.
+    checked is true only when EIP-191 recovery actually ran; every other refusal reports checked false."""
     try:
         d=json.loads(response_json) if isinstance(response_json,str) else dict(response_json)
     except Exception as e:
@@ -365,7 +369,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
         return {"status":"unsupported_shape","valid":False,"checked":False,"signer_claimed":d.get("signer"),
                 "manifest_fetched_at":at,"note":"envelope signer/signature shape (settle/watchdog); not checked by this tool."}
     if "signature" not in d or "signed_by" not in d:
-        return {"status":"invalid","valid":False,"checked":True,"manifest_fetched_at":at,"note":"response has no signed_by/signature pair"}
+        return {"status":"invalid","valid":False,"checked":False,"manifest_fetched_at":at,"note":"response has no signed_by/signature pair"}
     sb=d["signed_by"]; sig=d["signature"]; slc={k.lower() for k in signers}
     if not (isinstance(sig,str) and sig[:2]=="0x" and len(sig)==132 and all(c in "0123456789abcdefABCDEF" for c in sig[2:])):
         return {"status":"malformed_signature","valid":False,"checked":False,"signed_by_claimed":sb,
@@ -373,9 +377,18 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     if service:
         cands={service:FLAT[service]} if service in FLAT else {}
         if not cands:
-            return {"status":"invalid","valid":False,"checked":True,"signed_by_claimed":sb,"manifest_fetched_at":at,"note":f"unknown or non-flat service '{service}'"}
+            return {"status":"invalid","valid":False,"checked":False,"signed_by_claimed":sb,"manifest_fetched_at":at,"note":f"unknown or non-flat service '{service}'"}
     else:
         cands={n:i for n,i in FLAT.items() if i["signer"]==sb.lower()}
+    if not cands:
+        if sb.lower() in slc:
+            covered=next((v for k,v in signers.items() if k.lower()==sb.lower()),[])
+            return {"status":"no_flat_recipe","valid":False,"checked":False,"signer":None,"signed_by_claimed":sb,
+                    "in_manifest":True,"services_covered":covered,"manifest_fetched_at":at,
+                    "note":"signer is in the manifest but covers no flat service recipe (its services use envelope shapes, verify them offline with the manifest recipe); recovery was not attempted"}
+        return {"status":"unknown_signer","valid":False,"checked":False,"signer":None,"signed_by_claimed":sb,
+                "in_manifest":False,"manifest_fetched_at":at,
+                "note":"signed_by is not a manifest signer; recovery was not attempted"}
     recovery_attempted=False; reasons=[]
     for name,info in cands.items():
         _miss=_REQUIRED.get(name,set())-set(d.keys())
