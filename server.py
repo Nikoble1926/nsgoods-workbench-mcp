@@ -289,9 +289,11 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     published manifest signers. Reproduction-attestation (JCS/byte-length) and envelope
     (signer/signature, components) shapes are reported as unsupported_shape, not verified here.
     Refusals carry a distinct status: malformed_signature (signature is not a 65-byte 0x-prefixed
-    hex string), signature_mismatch (well-formed but recovers a different address than signed_by
-    under every candidate service recipe of this signer), unsupported_shape, or the
-    no-signed_by/signature-pair case."""
+    hex string), schema_rejected (the body carries a signed_by/signature pair but fails the required
+    field shape for every service the claimed signer covers; recovery was not attempted, checked is
+    false, reasons lists the failed candidates), signature_mismatch (well-formed but recovers a
+    different address than signed_by under every candidate service recipe of this signer),
+    unsupported_shape, or the no-signed_by/signature-pair case."""
     try:
         d=json.loads(response_json) if isinstance(response_json,str) else dict(response_json)
     except Exception as e:
@@ -374,9 +376,14 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             return {"status":"invalid","valid":False,"checked":True,"signed_by_claimed":sb,"manifest_fetched_at":at,"note":f"unknown or non-flat service '{service}'"}
     else:
         cands={n:i for n,i in FLAT.items() if i["signer"]==sb.lower()}
+    recovery_attempted=False; reasons=[]
     for name,info in cands.items():
-        if not _REQUIRED.get(name,set()).issubset(d.keys()): continue
-        if name in _NEGATIVE and (_NEGATIVE[name] & set(d.keys())): continue
+        _miss=_REQUIRED.get(name,set())-set(d.keys())
+        if _miss:
+            reasons.append(f"body is missing required field(s) {sorted(_miss)} for service '{name}'"); continue
+        if name in _NEGATIVE and (_NEGATIVE[name] & set(d.keys())):
+            reasons.append(f"body carries disqualifying field(s) {sorted(_NEGATIVE[name] & set(d.keys()))} for service '{name}'"); continue
+        recovery_attempted=True
         rec,mode=rec_flat(d,info["post_sign"],sig)
         if rec and rec.lower()==sb.lower() and sb.lower() in slc:
             scopes=next((v for k,v in signers.items() if k.lower()==rec.lower()),None)
@@ -384,6 +391,10 @@ def verify_signature(response_json: str, service: str = "") -> dict:
                     "scopes":scopes,"in_manifest":True,"canonicalization":mode,"post_sign_stripped":info["post_sign"],
                     "anchor":_anchor(rec,name),
                     "manifest_fetched_at":at,"note":"recovered signer matches signed_by under this service's post-sign recipe and is a published manifest signer"}
+    if cands and not recovery_attempted:
+        return {"status":"schema_rejected","valid":False,"checked":False,"signer":None,"signed_by_claimed":sb,
+                "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,"reasons":reasons,
+                "note":"signature was not checked: the body does not match the required field shape of any service this signer covers (schema gate), so no recovery was attempted"}
     return {"status":"signature_mismatch","valid":False,"checked":True,"signer":None,"signed_by_claimed":sb,
             "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,
             "note":"signature is well-formed but recovers a different address than signed_by under every candidate service recipe of this signer; the body may be altered or signed for a different service"}
