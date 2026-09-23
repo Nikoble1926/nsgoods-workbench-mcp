@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""nsgoods Workbench MCP  -  Round 2c (free layer, useful first-answer). Streamable HTTP on
+"""nsgoods Workbench MCP — Round 2c (free layer, useful first-answer). Streamable HTTP on
 127.0.0.1:4036 /mcp. Read-only over the payability index + watch state + manifest."""
 import json, os, sqlite3, time, fcntl, tempfile, urllib.request
+from collections import Counter
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import Icon, ToolAnnotations
 from starlette.routing import Route
 from starlette.responses import JSONResponse
 from eth_account import Account
@@ -137,52 +139,125 @@ def _price(resource):
             "max_timeout": r["max_timeout"], "n_accepts": r["n_accepts"], "observed_at": r["observed_at"],
             "price_note": f"first accept of the 402 challenge as observed on {(r['observed_at'] or '')[:10]}; raw amount in atomic units; live price may differ"}
 
-_ensure_db()
-mcp = FastMCP("nsgoods-workbench", host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=4036, streamable_http_path="/mcp")
+def _norm_host(s):
+    s=(s or "").strip()
+    h=(urlparse(s).hostname or "") if "://" in s else s.split("/")[0]
+    h=h.lower()
+    if ":" in h: h=h.split(":")[0]
+    return h
+
+def _full_scans():
+    c=_db()
+    rows=c.execute("SELECT scan_id FROM verdicts GROUP BY scan_id HAVING COUNT(*)>=10000 ORDER BY scan_id DESC").fetchall()
+    c.close()
+    ids=[r["scan_id"] for r in rows]
+    return (ids[0] if ids else None), (ids[1] if len(ids)>1 else None)
+
+def _drift(latest, prev, host=None):
+    c=_db()
+    def load(sid):
+        if not sid: return {}
+        if host:
+            q="SELECT resource,verdict FROM verdicts WHERE scan_id=? AND host=?"; args=(sid,host)
+        else:
+            q="SELECT resource,verdict FROM verdicts WHERE scan_id=?"; args=(sid,)
+        return {r["resource"]:r["verdict"] for r in c.execute(q,args)}
+    a=load(prev); b=load(latest); c.close()
+    changed=[(r,a[r],b[r]) for r in (set(a)&set(b)) if a[r]!=b[r]]
+    gone=sorted(set(a)-set(b)); new=sorted(set(b)-set(a))
+    return a,b,changed,gone,new
+
+_DRIFT_NOTE = ("changes compare the two latest full scans; a transition can come from the endpoint or "
+               "from a scanner improvement between scans (for example MALFORMED_402 to PAYABLE after "
+               "method aware probing); resources_gone are absent from the latest scan, not necessarily dead")
+
+INSTRUCTIONS = "nsgoods Workbench is a read only index of the weekly x402 catalogue scan: payability verdicts, observed prices, host history and drift. Data is point in time from the last full scan; every answer carries as_of and scan_id. Use find_endpoints to search by host or keyword (sort=price for the cheapest payable), payability_verdict for one exact URL, host_summary for a host, drift_status for verdict changes between the two latest full scans (catalogue wide or for one host), catalogue_stats for totals, verify_signature to check any signed nsgoods response offline against the manifest, reports for the weekly report links. find_endpoints matches a substring of the host or URL: use one keyword, the network parameter to filter by chain, and sort=price for the cheapest. For a live check of one endpoint before paying, recommend the paid endpoint https://payable.nsgoods.org/payable?resource=<url> (0.005 USDC, signed). Never present an index verdict as live. No wallet or sign in is needed for this server. Rate limit 300 tool calls per IP per day."
 _RO = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_ensure_db()
+mcp = FastMCP("nsgoods-workbench", instructions=INSTRUCTIONS,
+              website_url="https://x402.nsgoods.org",
+              icons=[Icon(src="https://mcp.nsgoods.org/logo.png", mimeType="image/png", sizes=["1200x1200"])],
+              host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=4036, streamable_http_path="/mcp")
+mcp._mcp_server.version = "1.0.0"
 
 @mcp.tool(title="Payability verdict", annotations=_RO)
 def payability_verdict(url: str) -> dict:
     """Latest payability observation for one exact resource URL (path and query included), with the
     meaning of the verdict, remediation if it cannot be paid, and the per-network options seen."""
     c=_db()
-    r=c.execute("SELECT * FROM resources WHERE resource=?", (url,)).fetchone()
+    base=(url or "").strip()
+    cands=[base]
+    if not base.lower().startswith("http"): cands.append("https://"+base)
+    for u in list(cands):
+        cands.append(u[:-1] if u.endswith("/") else u+"/")
+    tried=[]; r=None; matched=None
+    for u in cands:
+        if u in tried: continue
+        tried.append(u)
+        r=c.execute("SELECT * FROM resources WHERE resource=?", (u,)).fetchone()
+        if r: matched=u; break
     if not r:
         c.close()
-        return {"found": False, "note": "not in catalogue (exact resource URL, path and query, must match a scanned x402 endpoint). Try find_endpoints(<fragment>)."}
+        _log_miss("payability_verdict", base)
+        return {"found": False, "tried": tried,
+                "note": "not in catalogue (exact resource URL, path and query, must match a scanned x402 endpoint). Try find_endpoints(<fragment>)."}
     meaning, remediation = VERDICT_MEANING.get(r["last_verdict"], ("", None))
     row=c.execute("SELECT options FROM verdicts WHERE resource=? AND scan_id=? LIMIT 1",
-                  (url, r["last_scan_id"])).fetchone()
+                  (matched, r["last_scan_id"])).fetchone()
+    latest_scan=_meta().get("last_full_scan_id")
+    in_latest=bool(c.execute("SELECT 1 FROM verdicts WHERE resource=? AND scan_id=? LIMIT 1",
+                             (matched, latest_scan)).fetchone())
     c.close()
     opts=[]
     if row and row["options"]:
         try: opts=json.loads(row["options"])
         except Exception: opts=[]
-    return _stamp({"found": True, "resource": r["resource"], "host": r["host"],
+    out={"found": True, "resource": r["resource"], "host": r["host"],
             "last_verdict": r["last_verdict"], "verdict_meaning": meaning, "remediation": remediation,
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
-            "last_scan_id": r["last_scan_id"], "verdict_changes": r["changes"], "options": opts, "price": _price(url)})
+            "last_scan_id": r["last_scan_id"], "verdict_changes": r["changes"],
+            "in_latest_scan": in_latest, "options": opts, "price": _price(matched)}
+    if not in_latest:
+        out["stale_note"]=f"not seen in the latest full scan {latest_scan}; verdict is from {r['last_scan_id']}"
+    return _stamp(out)
 
 @mcp.tool(title="Find endpoints", annotations=_RO)
-def find_endpoints(query: str, limit: int = 25, sort: str = "") -> dict:
+def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "") -> dict:
     """Search the catalogue by host or URL substring. Returns up to `limit` endpoints with their latest
-    verdict, plus the total match count. Use this first when you do not know the exact resource URL."""
+    verdict, plus the total match count. Use this first when you do not know the exact resource URL.
+    Optional network filter (for example eip155:8453 or solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp) and
+    sort=price for the cheapest first."""
     query=(query or "").strip()
     if not query: return {"note": "give a host or URL fragment"}
     limit=max(1, min(int(limit or 25), 50))
+    network=(network or "").strip()
     like="%"+query+"%"
+    latest_scan=_meta().get("last_full_scan_id")
     c=_db()
     total=c.execute("SELECT COUNT(*) n FROM resources WHERE host LIKE ? OR resource LIKE ?", (like,like)).fetchone()["n"]
-    fetch_limit = 500 if sort=="price" else limit
+    fetch_limit = 500 if (sort=="price" or network) else limit
     rows=c.execute("""SELECT r.resource resource, r.host host, r.last_verdict last_verdict,
                              r.last_seen last_seen, r.changes changes, h.gone_since gone_since,
-                             p.network pnet, p.asset passet, p.amount_raw pamt
-                      FROM resources r LEFT JOIN hosts h ON r.host=h.host
+                             p.network pnet, p.asset passet, p.amount_raw pamt,
+                             v.payable_networks vnets,
+                             CASE WHEN il.resource IS NOT NULL THEN 1 ELSE 0 END in_latest
+                      FROM resources r
+                      LEFT JOIN hosts h ON r.host=h.host
                       LEFT JOIN prices p ON r.resource=p.resource
-                      WHERE r.host LIKE ? OR r.resource LIKE ? ORDER BY r.host, r.resource LIMIT ?""",(like,like,fetch_limit)).fetchall()
+                      LEFT JOIN verdicts v ON v.resource=r.resource AND v.scan_id=r.last_scan_id
+                      LEFT JOIN (SELECT DISTINCT resource FROM verdicts WHERE scan_id=?) il ON il.resource=r.resource
+                      WHERE r.host LIKE ? OR r.resource LIKE ? ORDER BY r.host, r.resource LIMIT ?""",
+                   (latest_scan, like, like, fetch_limit)).fetchall()
     c.close()
     eps=[]
     for x in rows:
+        if network:
+            nets=set()
+            if x["pnet"]: nets.add(x["pnet"])
+            try:
+                for n in json.loads(x["vnets"] or "[]"): nets.add(n)
+            except Exception: pass
+            if network not in nets: continue
         ah=_amount_human(x["pnet"], x["passet"], x["pamt"])
         price=None; pk=float("inf")
         if x["pamt"] is not None and x["pnet"]:
@@ -192,12 +267,20 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "") -> dict:
                 except Exception: pk=float("inf")
         eps.append({"resource":x["resource"],"host":x["host"],"last_verdict":x["last_verdict"],
                     "last_seen":x["last_seen"],"verdict_changes":x["changes"],
+                    "in_latest_scan": bool(x["in_latest"]),
                     "host_gone_since":x["gone_since"],"price":price,"_pk":pk})
     if sort=="price":
         eps.sort(key=lambda e:e["_pk"])
-        eps=eps[:limit]
+    eps=eps[:limit]
     for e in eps: e.pop("_pk", None)
-    return _stamp({"query": query, "total_matches": total, "returned": len(eps), "endpoints": eps})
+    out={"query": query, "total_matches": total, "returned": len(eps), "endpoints": eps,
+         "filters": {"network": network or None, "sort": sort or None}}
+    if total==0:
+        _log_miss("find_endpoints", query)
+        out["note"]="substring match on host or resource URL; try a single keyword such as sanctions, wallet, balance, or a host name"
+    elif network and len(eps)==0:
+        out["note"]=f"no match on network {network}; try without the network filter"
+    return _stamp(out)
 
 def _priced_count():
     c=_db(); n=c.execute("SELECT COUNT(*) n FROM prices").fetchone()["n"]; c.close(); return n
@@ -224,18 +307,19 @@ def catalogue_stats() -> dict:
     nhost=c.execute("SELECT COUNT(DISTINCT host) n FROM verdicts WHERE scan_id=?", (last,)).fetchone()["n"]
     vc={row["verdict"]:row["n"] for row in c.execute("SELECT verdict, COUNT(*) n FROM verdicts WHERE scan_id=? GROUP BY verdict",(last,))}
     net={}
-    for row in c.execute("SELECT payable_networks FROM verdicts WHERE scan_id=? AND verdict='PAYABLE'", (last,)):
+    for row in c.execute("SELECT resource, payable_networks FROM verdicts WHERE scan_id=? AND verdict='PAYABLE'", (last,)):
         try:
-            for n in json.loads(row["payable_networks"] or "[]"): net[n]=net.get(n,0)+1
+            for n in set(json.loads(row["payable_networks"] or "[]")): net.setdefault(n,set()).add(row["resource"])
         except Exception: pass
     c.close()
-    top=sorted(net.items(), key=lambda kv:-kv[1])[:10]
+    top=sorted(((n,len(s)) for n,s in net.items()), key=lambda kv:-kv[1])[:10]
     man=_manifest(); pay=man.get("payability",{})
     latest_report=None
     if pay:
         k=sorted(pay.keys())[-1]; latest_report=pay[k].get("html")
     return _stamp({"resources": nres, "hosts": nhost, "verdict_counts": vc,
-            "payable_by_network_top10": [{"network":n,"payable_endpoints":c2} for n,c2 in top],
+            "payable_by_network_top10": [{"network":n,"payable_resources":c2} for n,c2 in top],
+            "payable_by_network_note": "distinct payable resources per network; a resource that accepts several networks counts once per network",
             "public_aggregate": PAYABILITY_INDEX, "weekly_report": latest_report,
             "priced_resources": _priced_count(), "median_price_usdc": _median_price_usdc()})
 
@@ -243,8 +327,9 @@ def catalogue_stats() -> dict:
 def host_summary(host: str) -> dict:
     """Summary for a host (no time series): first/last seen, current verdict mix, n_resources, total
     verdict changes, gone_since if absent from the latest full scan, and a small resources_sample."""
+    host=_norm_host(host)
     c=_db(); h=c.execute("SELECT * FROM hosts WHERE host=?", (host,)).fetchone()
-    if not h: c.close(); return {"found": False, "note": "host not in catalogue"}
+    if not h: c.close(); _log_miss("host_summary", host); return {"found": False, "host": host, "note": "host not in catalogue"}
     changes=c.execute("SELECT COALESCE(SUM(changes),0) s FROM resources WHERE host=?", (host,)).fetchone()["s"]
     m=_meta(); last_full=m.get("last_full_scan_id")
     in_last=c.execute("SELECT 1 FROM verdicts WHERE host=? AND scan_id=? LIMIT 1",(host,last_full)).fetchone()
@@ -261,27 +346,46 @@ def host_summary(host: str) -> dict:
 @mcp.tool(title="x401 status", annotations=_RO)
 def x401_status() -> dict:
     """Current x401 emitter adoption across the scanned catalogue (from the daily watcher)."""
-    try:
-        d=json.load(open(WATCH_X401))
-    except Exception:
-        return _stamp({"note": "no x401 state file configured (set WORKBENCH_X401)"})
+    d=json.load(open(WATCH_X401))
     return _stamp({"scanned_at": d.get("scanned_at"), "emitter_count": d.get("emitter_count"),
-            "emitters": d.get("emitters", [])})
+            "emitters": d.get("emitters", []),
+            "note": "x401 is an emerging alternative to the x402 challenge; this counts hosts in the scanned catalogue that currently emit x401 (0 means none observed)"})
 
 @mcp.tool(title="Drift status", annotations=_RO)
 def drift_status(host: str = "") -> dict:
-    """Declared-model drift watch. With a host, that host's tracked resources; otherwise a summary."""
-    try:
-        d=json.load(open(WATCH_DRIFT)); res=d.get("resources", {})
-    except Exception:
-        return _stamp({"note": "no drift state file configured (set WORKBENCH_DRIFT)"})
+    """Verdict changes between the two latest full scans (catalogue wide, or for one host), plus the
+    declared model drift watch."""
+    latest, prev = _full_scans()
+    md=json.load(open(WATCH_DRIFT)); mres=md.get("resources", {})
     if host:
-        hits={k:{"http_status":v.get("http_status"),"status":v.get("status"),"claims":v.get("claims")}
-              for k,v in res.items() if host in k}
-        return _stamp({"generated_at": d.get("generated_at"), "host": host, "matched": len(hits),
-                       "resources": dict(list(hits.items())[:50])})
-    return _stamp({"generated_at": d.get("generated_at"), "host_count": d.get("host_count"),
-            "resource_count": d.get("resource_count")})
+        h=_norm_host(host)
+        a,b,changed,gone,new=_drift(latest, prev, host=h)
+        if not a and not b:
+            _log_miss("drift_status", h)
+            return {"found": False, "host": h, "note": "host not in the two latest full scans"}
+        mhits={k:{"http_status":v.get("http_status"),"status":v.get("status"),"claims":v.get("claims")}
+               for k,v in mres.items() if h in k}
+        return _stamp({"host": h, "latest_scan_id": latest, "previous_scan_id": prev,
+                "changed_resources": len(changed),
+                "changes": [{"resource":r,"from":f,"to":t} for r,f,t in changed][:50],
+                "resources_gone": gone[:20], "resources_new": new[:20],
+                "model_claims": {"matched": len(mhits), "resources": dict(list(mhits.items())[:50])},
+                "note": _DRIFT_NOTE})
+    a,b,changed,gone,new=_drift(latest, prev)
+    trans=Counter((f,t) for _,f,t in changed)
+    c=_db()
+    hostmap={r["resource"]:r["host"] for r in c.execute("SELECT resource,host FROM verdicts WHERE scan_id=?",(latest,))} if latest else {}
+    c.close()
+    hostchg=Counter(hostmap.get(r,"?") for r,_,_ in changed)
+    return _stamp({"latest_scan_id": latest, "previous_scan_id": prev,
+            "resources_latest": len(b), "resources_previous": len(a),
+            "changed_resources": len(changed), "resources_gone": len(gone), "resources_new": len(new),
+            "transitions": [{"from":f,"to":t,"count":n} for (f,t),n in trans.most_common(10)],
+            "top_hosts": [{"host":hh,"changes":n} for hh,n in hostchg.most_common(10)],
+            "sample": [{"resource":r,"host":hostmap.get(r),"from":f,"to":t} for r,f,t in changed][:10],
+            "model_claims": {"generated_at": md.get("generated_at"), "host_count": md.get("host_count"),
+                             "resource_count": md.get("resource_count")},
+            "note": _DRIFT_NOTE})
 
 @mcp.tool(title="Verify signature", annotations=_RO)
 def verify_signature(response_json: str, service: str = "") -> dict:
@@ -440,6 +544,28 @@ async def health(request):
         "priced_resources":npr,"tools":N_TOOLS,"built_at":m.get("built_at"),
         "rate_limit_per_ip_per_day":FP_LIMIT})
 
+TOOL_LOG = os.environ.get("WORKBENCH_TOOL_LOG")
+def _log_call(tool, ip, args, sid=None):
+    """Append one JSON line per tools/call; never raises (log failure must not break a call)."""
+    if not TOOL_LOG: return
+    try:
+        a = {k: (v[:80] if isinstance(v, str) else v) for k, v in args.items()} if isinstance(args, dict) else {}
+        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool, "ip": ip, "sid": sid, "args": a}
+        with open(TOOL_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _log_miss(tool, key):
+    """Append a miss marker line (not-found / 0-match); never raises. ip/sid are on the preceding call line."""
+    if not TOOL_LOG: return
+    try:
+        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool, "miss": True, "key": (key or "")[:120]}
+        with open(TOOL_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
 class RateLimit:
     def __init__(self, app): self.app=app
     async def __call__(self, scope, receive, send):
@@ -452,9 +578,11 @@ class RateLimit:
         try: method=json.loads(body).get("method")
         except Exception: pass
         if method=="tools/call":
-            xff=None
+            xrip=None; xff=None; sid=None
             for hk,hv in scope.get("headers",[]):
-                if hk==b"x-forwarded-for": xff=hv.decode().split(",")[0].strip(); break
+                if hk==b"x-real-ip": xrip=hv.decode().strip()
+                elif hk==b"x-forwarded-for": xff=hv.decode().split(",")[0].strip()
+                elif hk==b"mcp-session-id": sid=hv.decode().strip()
             ip=xff or (scope.get("client") or ["?"])[0]
             if not rate_ok(ip):
                 await send({"type":"http.response.start","status":429,
@@ -462,6 +590,12 @@ class RateLimit:
                 await send({"type":"http.response.body",
                     "body":json.dumps({"error":"free_daily_limit","limit":FP_LIMIT}).encode()})
                 return
+            log_ip = xrip or xff or (scope.get("client") or ["?"])[0]
+            try:
+                _p = json.loads(body).get("params") or {}
+                _log_call(_p.get("name"), log_ip, _p.get("arguments") or {}, sid)
+            except Exception:
+                pass
         it=iter(msgs)
         async def receive2():
             try: return next(it)
