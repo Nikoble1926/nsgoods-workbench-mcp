@@ -5,6 +5,7 @@ import json, os, sqlite3, time, fcntl, tempfile, urllib.request
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.routing import Route
 from starlette.responses import JSONResponse
 from eth_account import Account
@@ -138,8 +139,9 @@ def _price(resource):
 
 _ensure_db()
 mcp = FastMCP("nsgoods-workbench", host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=4036, streamable_http_path="/mcp")
+_RO = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
-@mcp.tool()
+@mcp.tool(title="Payability verdict", annotations=_RO)
 def payability_verdict(url: str) -> dict:
     """Latest payability observation for one exact resource URL (path and query included), with the
     meaning of the verdict, remediation if it cannot be paid, and the per-network options seen."""
@@ -161,7 +163,7 @@ def payability_verdict(url: str) -> dict:
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
             "last_scan_id": r["last_scan_id"], "verdict_changes": r["changes"], "options": opts, "price": _price(url)})
 
-@mcp.tool()
+@mcp.tool(title="Find endpoints", annotations=_RO)
 def find_endpoints(query: str, limit: int = 25, sort: str = "") -> dict:
     """Search the catalogue by host or URL substring. Returns up to `limit` endpoints with their latest
     verdict, plus the total match count. Use this first when you do not know the exact resource URL."""
@@ -212,7 +214,7 @@ def _median_price_usdc():
     vals.sort(); m=vals[len(vals)//2] if len(vals)%2 else (vals[len(vals)//2-1]+vals[len(vals)//2])/2
     return round(m,6)
 
-@mcp.tool()
+@mcp.tool(title="Catalogue stats", annotations=_RO)
 def catalogue_stats() -> dict:
     """Size and health of the x402 catalogue as of the latest full scan: resources, hosts, verdict
     counts, and payable endpoints per network."""
@@ -237,7 +239,7 @@ def catalogue_stats() -> dict:
             "public_aggregate": PAYABILITY_INDEX, "weekly_report": latest_report,
             "priced_resources": _priced_count(), "median_price_usdc": _median_price_usdc()})
 
-@mcp.tool()
+@mcp.tool(title="Host summary", annotations=_RO)
 def host_summary(host: str) -> dict:
     """Summary for a host (no time series): first/last seen, current verdict mix, n_resources, total
     verdict changes, gone_since if absent from the latest full scan, and a small resources_sample."""
@@ -256,7 +258,7 @@ def host_summary(host: str) -> dict:
             "verdict_changes_total": changes, "gone_since": gone_since, "latest_full_scan": last_full,
             "resources_sample": sample, "hint": "call find_endpoints(host) for the full list"})
 
-@mcp.tool()
+@mcp.tool(title="x401 status", annotations=_RO)
 def x401_status() -> dict:
     """Current x401 emitter adoption across the scanned catalogue (from the daily watcher)."""
     try:
@@ -266,7 +268,7 @@ def x401_status() -> dict:
     return _stamp({"scanned_at": d.get("scanned_at"), "emitter_count": d.get("emitter_count"),
             "emitters": d.get("emitters", [])})
 
-@mcp.tool()
+@mcp.tool(title="Drift status", annotations=_RO)
 def drift_status(host: str = "") -> dict:
     """Declared-model drift watch. With a host, that host's tracked resources; otherwise a summary."""
     try:
@@ -281,7 +283,7 @@ def drift_status(host: str = "") -> dict:
     return _stamp({"generated_at": d.get("generated_at"), "host_count": d.get("host_count"),
             "resource_count": d.get("resource_count")})
 
-@mcp.tool()
+@mcp.tool(title="Verify signature", annotations=_RO)
 def verify_signature(response_json: str, service: str = "") -> dict:
     """Offline EIP-191 verify of a signed nsgoods response. Identifies the service from the
     manifest (or the optional `service` arg), strips exactly that service's post-sign fields,
@@ -301,7 +303,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
     try:
         d=json.loads(response_json) if isinstance(response_json,str) else dict(response_json)
     except Exception as e:
-        return {"status":"error","valid":False,"note":f"input is not valid JSON: {e}"}
+        return {"status":"error","valid":False,"checked":False,"signer":None,"note":f"input is not valid JSON: {e}"}
     man=_manifest(); signers=man.get("signers",{}); at=_mc.get("at")
     _REQUIRED={"signals":{"signal","pair","timeframe"},"trust":{"result"},
         "sanctions":{"verdict","sanctioned","sdn_snapshot_at"},
@@ -358,7 +360,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":True}
         return {"via":"cross_signed_by","root":_ROOT,"authorization_ok":False,"reason":"no valid authorization entry for this signer and service"}
     if not isinstance(d,dict):
-        return {"status":"error","valid":False,"note":"input is not a JSON object","manifest_fetched_at":at}
+        return {"status":"error","valid":False,"checked":False,"signer":None,"note":"input is not a JSON object","manifest_fetched_at":at}
     if is_att(d):
         return {"status":"unsupported_shape","valid":False,"checked":False,"signed_by_claimed":d.get("signed_by"),
                 "manifest_fetched_at":at,"note":"reproduction attestation (RFC8785/JCS with byte-length prefix over the payload sub-object); not checked by this tool. Verify with the scheme in the manifest reproduction_attestations."}
@@ -412,7 +414,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,
             "note":"signature is well-formed but recovers a different address than signed_by under every candidate service recipe of this signer; the body may be altered or signed for a different service"}
 
-@mcp.tool()
+@mcp.tool(title="Weekly reports", annotations=_RO)
 def reports() -> dict:
     """Published weekly payability reports (from the signed manifest)."""
     man=_manifest(); pay=man.get("payability", {})
