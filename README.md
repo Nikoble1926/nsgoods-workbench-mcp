@@ -113,6 +113,8 @@ The server creates an empty index on first run if none is present, so tools/list
 ## Verification
 Signed nsgoods responses use EIP-191 over canonical JSON (sorted keys, compact separators, ASCII escaped, signature and signed_by removed before hashing). The verify_signature tool checks the recovered address against the signers in https://x402.nsgoods.org/proof/index.json
 
+Verifying what runs. `python3 scripts/pin_verify_signature.py server.py` prints the line range, byte range and sha256 of the verify_signature function body (def to end, decorators excluded, LF line endings, no trailing newline) and the sha256 of the whole file. A matching hash is repo evidence only: it shows that the published source is the one described. It is not deployment evidence. The stronger evidence for what the server runs is behavioural: calling the live tools and checking that the results match what this source produces.
+
 ## Links
 Landing https://mcp.nsgoods.org/ · Hub https://x402.nsgoods.org · MCP section https://x402.nsgoods.org/#mcp
 Weekly report https://x402.nsgoods.org/proof/payability-report-2026-09-13.html

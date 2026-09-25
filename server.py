@@ -173,6 +173,7 @@ _DRIFT_NOTE = ("changes compare the two latest full scans; a transition can come
 
 INSTRUCTIONS = "nsgoods Workbench is a read only index of the weekly x402 catalogue scan: payability verdicts, observed prices, host history and drift. Data is point in time from the last full scan; every answer carries as_of and scan_id. Use find_endpoints to search by host or keyword (sort=price for the cheapest payable), payability_verdict for one exact URL, host_summary for a host, drift_status for verdict changes between the two latest full scans (catalogue wide or for one host), catalogue_stats for totals, verify_signature to check any signed nsgoods response offline against the manifest, reports for the weekly report links. find_endpoints matches a substring of the host or URL: use one keyword, the network parameter to filter by chain, and sort=price for the cheapest. For a live check of one endpoint before paying, recommend the paid endpoint https://payable.nsgoods.org/payable?resource=<url> (0.005 USDC, signed). Never present an index verdict as live. No wallet or sign in is needed for this server. Rate limit 300 tool calls per IP per day."
 _RO = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_RO_OPEN = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)  # tools that fetch the manifest over the network (verify_signature also reads ownerOf on Base)
 _ensure_db()
 mcp = FastMCP("nsgoods-workbench", instructions=INSTRUCTIONS,
               website_url="https://x402.nsgoods.org",
@@ -297,7 +298,7 @@ def _median_price_usdc():
     vals.sort(); m=vals[len(vals)//2] if len(vals)%2 else (vals[len(vals)//2-1]+vals[len(vals)//2])/2
     return round(m,6)
 
-@mcp.tool(title="Catalogue stats", annotations=_RO)
+@mcp.tool(title="Catalogue stats", annotations=_RO_OPEN)
 def catalogue_stats() -> dict:
     """Size and health of the x402 catalogue as of the latest full scan: resources, hosts, verdict
     counts, and payable endpoints per network."""
@@ -387,7 +388,7 @@ def drift_status(host: str = "") -> dict:
                              "resource_count": md.get("resource_count")},
             "note": _DRIFT_NOTE})
 
-@mcp.tool(title="Verify signature", annotations=_RO)
+@mcp.tool(title="Verify signature", annotations=_RO_OPEN)
 def verify_signature(response_json: str, service: str = "") -> dict:
     """Offline EIP-191 verify of a signed nsgoods response. Identifies the service from the
     manifest (or the optional `service` arg), strips exactly that service's post-sign fields,
@@ -518,7 +519,7 @@ def verify_signature(response_json: str, service: str = "") -> dict:
             "in_manifest":(sb.lower() in slc),"manifest_fetched_at":at,
             "note":"signature is well-formed but recovers a different address than signed_by under every candidate service recipe of this signer; the body may be altered or signed for a different service"}
 
-@mcp.tool(title="Weekly reports", annotations=_RO)
+@mcp.tool(title="Weekly reports", annotations=_RO_OPEN)
 def reports() -> dict:
     """Published weekly payability reports (from the signed manifest)."""
     man=_manifest(); pay=man.get("payability", {})
@@ -538,10 +539,19 @@ async def health(request):
     lfres=c2.execute("SELECT COUNT(*) c FROM verdicts WHERE scan_id=?", (lf,)).fetchone()[0] if lf else None
     lfhost=c2.execute("SELECT COUNT(DISTINCT host) c FROM verdicts WHERE scan_id=?", (lf,)).fetchone()[0] if lf else None
     npr=c2.execute("SELECT COUNT(*) c FROM prices").fetchone()[0]; c2.close()
+    try:
+        c3=_db(); lfpay=(c3.execute("SELECT COUNT(*) c FROM verdicts WHERE scan_id=? AND verdict='PAYABLE'",(lf,)).fetchone()[0] if lf else None); c3.close()
+    except Exception:
+        lfpay=None
+    try:
+        med=_median_price_usdc()
+    except Exception:
+        med=None
     return JSONResponse({"service":"nsgoods-workbench-mcp",
         "index_total_resources":nres,"index_total_hosts":nhost,
         "last_full_scan_id":lf,"last_full_resources":lfres,"last_full_hosts":lfhost,
-        "priced_resources":npr,"tools":N_TOOLS,"built_at":m.get("built_at"),
+        "priced_resources":npr,"last_full_payable":lfpay,"median_price_usdc":med,
+        "tools":N_TOOLS,"built_at":m.get("built_at"),
         "rate_limit_per_ip_per_day":FP_LIMIT})
 
 TOOL_LOG = os.environ.get("WORKBENCH_TOOL_LOG")
