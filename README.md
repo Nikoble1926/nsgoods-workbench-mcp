@@ -3,6 +3,7 @@
 </p>
 
 <h1 align="center">nsgoods Workbench MCP</h1>
+[![M8ven Verified](https://m8ven.ai/badge/mcp/nikoble1926/nsgoods-workbench-mcp?variant=verified)](https://m8ven.ai/mcp/nikoble1926/nsgoods-workbench-mcp)
 
 <p align="center">Read only index of the weekly x402 catalogue scan. Which endpoints are payable, what they cost, which hosts are gone.<br>No wallet. No sign in. No payments handled by this server.</p>
 
