@@ -3,7 +3,6 @@
 </p>
 
 <h1 align="center">nsgoods Workbench MCP</h1>
-[![M8ven Verified](https://m8ven.ai/badge/mcp/nikoble1926/nsgoods-workbench-mcp?variant=verified)](https://m8ven.ai/mcp/nikoble1926/nsgoods-workbench-mcp)
 
 <p align="center">Read only index of the weekly x402 catalogue scan. Which endpoints are payable, what they cost, which hosts are gone.<br>No wallet. No sign in. No payments handled by this server.</p>
 
@@ -12,6 +11,7 @@
   <a href="https://registry.modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP%20Registry-org.nsgoods%2Fnsgoods--workbench--mcp-111111" alt="MCP Registry"></a>
   <a href="https://smithery.ai/servers/nikosble1926/nsgoods-workbench"><img src="https://img.shields.io/badge/Smithery-listed-111111" alt="Smithery"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-111111" alt="MIT"></a>
+  <a href="https://m8ven.ai/mcp/nikoble1926/nsgoods-workbench-mcp"><img src="https://m8ven.ai/badge/mcp/nikoble1926/nsgoods-workbench-mcp?variant=verified" alt="M8ven Verified"></a>
 </p>
 
 ## What it answers
