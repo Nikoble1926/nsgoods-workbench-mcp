@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """nsgoods Workbench MCP — Round 2c (free layer, useful first-answer). Streamable HTTP on
 127.0.0.1:4036 /mcp. Read-only over the payability index + watch state + manifest."""
-import json, os, sqlite3, time, fcntl, tempfile, urllib.request
+import json, os, sqlite3, time, fcntl, tempfile, urllib.request, hmac, hashlib, secrets
 from collections import Counter
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -23,6 +23,18 @@ PAYABILITY_INDEX = "https://x402.nsgoods.org/ata-audit/payability_index.json"
 FP_STORE = os.environ.get("WORKBENCH_FP_STORE", os.path.join(tempfile.gettempdir(), "nsgoods_fp_limit_workbench.json"))
 FP_LIMIT = 300
 N_TOOLS = 8
+
+# ---- privacy: daily-keyed, non-reversible-after-day hash of the caller IP ----
+# Single-process server: the secret lives only in memory, is regenerated at each UTC
+# day change, is never written to the log, and the previous day's secret is discarded.
+_IP_SECRET = None
+_IP_SECRET_DAY = None
+def _ip_hash(ip):
+    global _IP_SECRET, _IP_SECRET_DAY
+    day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    if _IP_SECRET is None or _IP_SECRET_DAY != day:
+        _IP_SECRET = secrets.token_bytes(32); _IP_SECRET_DAY = day
+    return hmac.new(_IP_SECRET, (ip or '').encode('utf-8'), hashlib.sha256).hexdigest()[:16]
 
 def _ensure_db():
     if os.path.exists(DB): return
@@ -171,7 +183,7 @@ _DRIFT_NOTE = ("changes compare the two latest full scans; a transition can come
                "from a scanner improvement between scans (for example MALFORMED_402 to PAYABLE after "
                "method aware probing); resources_gone are absent from the latest scan, not necessarily dead")
 
-INSTRUCTIONS = "nsgoods Workbench is a read only index of the weekly x402 catalogue scan: payability verdicts, observed prices, host history and drift. Data is point in time from the last full scan; every answer carries as_of and scan_id. Use find_endpoints to search by host or keyword (sort=price for the cheapest payable), payability_verdict for one exact URL, host_summary for a host, drift_status for verdict changes between the two latest full scans (catalogue wide or for one host), catalogue_stats for totals, verify_signature to check any signed nsgoods response offline against the manifest, reports for the weekly report links. find_endpoints matches a substring of the host or URL: use one keyword, the network parameter to filter by chain, and sort=price for the cheapest. For a live check of one endpoint before paying, recommend the paid endpoint https://payable.nsgoods.org/payable?resource=<url> (0.005 USDC, signed). Never present an index verdict as live. No wallet or sign in is needed for this server. Rate limit 300 tool calls per IP per day."
+INSTRUCTIONS = "nsgoods Workbench is a read only index of the weekly x402 catalogue scan: payability verdicts, observed prices, host history and drift. Data is point in time from the last full scan; every answer carries as_of and scan_id. Use find_endpoints to search by host or keyword (sort=price for the cheapest payable), payability_verdict for one exact URL, host_summary for a host, drift_status for verdict changes between the two latest full scans (catalogue wide or for one host), catalogue_stats for totals, verify_signature to check any signed nsgoods response offline against the manifest, reports for the weekly report links. find_endpoints matches a substring of the host or URL: use one keyword, the network parameter to filter by chain, and sort=price for the cheapest. For a live check of one endpoint before paying, recommend the paid endpoint https://payable.nsgoods.org/payable?resource=<url> (0.005 USDC, signed). Never present an index verdict as live. No wallet or sign in is needed for this server. Rate limit 300 tool calls per IP per day. Logging: each tool call is recorded with time, tool name, argument names and lengths, and a daily keyed hash of the caller IP; no argument values and no raw IP are stored; records are deleted after 30 days (records written before 26 September 2026 used a fuller format and are deleted by 26 October 2026)."
 _RO = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 _RO_OPEN = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)  # tools that fetch the manifest over the network (verify_signature also reads ownerOf on Base)
 _ensure_db()
@@ -552,25 +564,34 @@ async def health(request):
         "last_full_scan_id":lf,"last_full_resources":lfres,"last_full_hosts":lfhost,
         "priced_resources":npr,"last_full_payable":lfpay,"median_price_usdc":med,
         "tools":N_TOOLS,"built_at":m.get("built_at"),
-        "rate_limit_per_ip_per_day":FP_LIMIT})
+        "rate_limit_per_ip_per_day":FP_LIMIT,
+        "tool_log":{"fields":["ts","tool","arg_names","arg_lengths","ip_h"],
+                    "ip":"daily-keyed hash, not reversible after the UTC day",
+                    "args":"names and lengths only","retention_days":30}})
 
 TOOL_LOG = os.environ.get("WORKBENCH_TOOL_LOG")
-def _log_call(tool, ip, args, sid=None):
-    """Append one JSON line per tools/call; never raises (log failure must not break a call)."""
+def _log_call(tool, ip_h, args):
+    """Append one JSON line per tools/call; never raises (log failure must not break a call).
+    Privacy: NO argument values and NO raw IP are stored -- only arg names, arg lengths, and ip_h."""
     if not TOOL_LOG: return
     try:
-        a = {k: (v[:80] if isinstance(v, str) else v) for k, v in args.items()} if isinstance(args, dict) else {}
-        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool, "ip": ip, "sid": sid, "args": a}
+        if isinstance(args, dict):
+            arg_names = sorted(args.keys())
+            arg_lengths = {k: (len(v) if isinstance(v, str) else None) for k, v in args.items()}
+        else:
+            arg_names, arg_lengths = [], {}
+        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool,
+               "arg_names": arg_names, "arg_lengths": arg_lengths, "ip_h": ip_h}
         with open(TOOL_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
-def _log_miss(tool, key):
-    """Append a miss marker line (not-found / 0-match); never raises. ip/sid are on the preceding call line."""
+def _log_miss(tool, key=None):
+    """Append a miss marker line (not-found / 0-match); never raises. No key/value is stored (privacy)."""
     if not TOOL_LOG: return
     try:
-        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool, "miss": True, "key": (key or "")[:120]}
+        rec = {"ts": datetime.now(timezone.utc).isoformat(), "tool": tool, "miss": True}
         with open(TOOL_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
@@ -588,22 +609,20 @@ class RateLimit:
         try: method=json.loads(body).get("method")
         except Exception: pass
         if method=="tools/call":
-            xrip=None; xff=None; sid=None
+            xff=None
             for hk,hv in scope.get("headers",[]):
-                if hk==b"x-real-ip": xrip=hv.decode().strip()
-                elif hk==b"x-forwarded-for": xff=hv.decode().split(",")[0].strip()
-                elif hk==b"mcp-session-id": sid=hv.decode().strip()
+                if hk==b"x-forwarded-for": xff=hv.decode().split(",")[0].strip()
             ip=xff or (scope.get("client") or ["?"])[0]
-            if not rate_ok(ip):
+            iph=_ip_hash(ip)
+            if not rate_ok(iph):
                 await send({"type":"http.response.start","status":429,
                     "headers":[(b"content-type",b"application/json")]})
                 await send({"type":"http.response.body",
                     "body":json.dumps({"error":"free_daily_limit","limit":FP_LIMIT}).encode()})
                 return
-            log_ip = xrip or xff or (scope.get("client") or ["?"])[0]
             try:
                 _p = json.loads(body).get("params") or {}
-                _log_call(_p.get("name"), log_ip, _p.get("arguments") or {}, sid)
+                _log_call(_p.get("name"), iph, _p.get("arguments") or {})
             except Exception:
                 pass
         it=iter(msgs)
