@@ -67,6 +67,16 @@ def _stamp(d: dict) -> dict:
     d["freshness_note"]="index rebuilt after each weekly full scan; for a live check use the paid /payable endpoint"
     return d
 
+def _age_days(last_seen, ref_iso):
+    """Integer days between an observation (last_seen) and the index scan time; None if unparseable."""
+    try:
+        from datetime import datetime as _dt
+        d=_dt.fromisoformat((last_seen or "").replace("Z","+00:00"))
+        rf=_dt.fromisoformat((ref_iso or "").replace("Z","+00:00"))
+        return max(0,(rf-d).days)
+    except Exception:
+        return None
+
 # ---- manifest cache (5 min) ----
 _mc = {"t":0,"d":None,"at":None}
 def _manifest():
@@ -217,7 +227,7 @@ def payability_verdict(url: str) -> dict:
     meaning, remediation = VERDICT_MEANING.get(r["last_verdict"], ("", None))
     row=c.execute("SELECT options FROM verdicts WHERE resource=? AND scan_id=? LIMIT 1",
                   (matched, r["last_scan_id"])).fetchone()
-    latest_scan=_meta().get("last_full_scan_id")
+    _m=_meta(); latest_scan=_m.get("last_full_scan_id"); _ref=_m.get("last_full_scanned_at")
     in_latest=bool(c.execute("SELECT 1 FROM verdicts WHERE resource=? AND scan_id=? LIMIT 1",
                              (matched, latest_scan)).fetchone())
     c.close()
@@ -225,9 +235,15 @@ def payability_verdict(url: str) -> dict:
     if row and row["options"]:
         try: opts=json.loads(row["options"])
         except Exception: opts=[]
+    _obs=r["last_seen"]; _age=_age_days(_obs, _ref)
+    if (not in_latest) and r["last_verdict"]!="PAYABLE":
+        _pfx=f"Observed on {(_obs or '')[:10]}, not re-checked since. May no longer apply. "
+        meaning=_pfx+(meaning or "")
+        if remediation: remediation=_pfx+remediation
     out={"found": True, "resource": r["resource"], "host": r["host"],
             "last_verdict": r["last_verdict"], "verdict_meaning": meaning, "remediation": remediation,
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+            "verdict_observed_at": _obs, "verdict_age_days": _age,
             "last_scan_id": r["last_scan_id"], "verdict_changes": r["changes"],
             "in_latest_scan": in_latest, "options": opts, "price": _price(matched)}
     if not in_latest:
@@ -236,8 +252,9 @@ def payability_verdict(url: str) -> dict:
 
 @mcp.tool(title="Find endpoints", annotations=_RO)
 def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "") -> dict:
-    """Search the catalogue by host or URL substring. Returns up to `limit` endpoints with their latest
-    verdict, plus the total match count. Use this first when you do not know the exact resource URL.
+    """Search the catalogue by host or URL substring. Returns up to `limit` endpoints (max 50) with their
+    latest verdict, plus the total match count. Use this first when you do not know the exact resource URL.
+    Rows with in_latest_scan=false carry a verdict from an earlier scan; read verdict_age_days.
     Optional network filter (for example eip155:8453 or solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp) and
     sort=price for the cheapest first."""
     query=(query or "").strip()
@@ -245,7 +262,7 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "
     limit=max(1, min(int(limit or 25), 50))
     network=(network or "").strip()
     like="%"+query+"%"
-    latest_scan=_meta().get("last_full_scan_id")
+    _m=_meta(); latest_scan=_m.get("last_full_scan_id"); _ref=_m.get("last_full_scanned_at")
     c=_db()
     total=c.execute("SELECT COUNT(*) n FROM resources WHERE host LIKE ? OR resource LIKE ?", (like,like)).fetchone()["n"]
     fetch_limit = 500 if (sort=="price" or network) else limit
@@ -279,7 +296,8 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "
                 try: pk=float(ah.split()[0])
                 except Exception: pk=float("inf")
         eps.append({"resource":x["resource"],"host":x["host"],"last_verdict":x["last_verdict"],
-                    "last_seen":x["last_seen"],"verdict_changes":x["changes"],
+                    "last_seen":x["last_seen"],"verdict_observed_at":x["last_seen"],
+                    "verdict_age_days":_age_days(x["last_seen"], _ref),"verdict_changes":x["changes"],
                     "in_latest_scan": bool(x["in_latest"]),
                     "host_gone_since":x["gone_since"],"price":price,"_pk":pk})
     if sort=="price":
@@ -339,16 +357,24 @@ def catalogue_stats() -> dict:
 @mcp.tool(title="Host summary", annotations=_RO)
 def host_summary(host: str) -> dict:
     """Summary for a host (no time series): first/last seen, current verdict mix, n_resources, total
-    verdict changes, gone_since if absent from the latest full scan, and a small resources_sample."""
+    verdict changes, gone_since if absent from the latest full scan, and a small resources_sample.
+    Sample rows with in_latest_scan=false carry a verdict from an earlier scan; read verdict_age_days.
+    n_resources counts every resource ever seen for this host; current_verdict_mix and n_payable_last_full count only the latest full scan."""
     host=_norm_host(host)
     c=_db(); h=c.execute("SELECT * FROM hosts WHERE host=?", (host,)).fetchone()
     if not h: c.close(); _log_miss("host_summary", host); return {"found": False, "host": host, "note": "host not in catalogue"}
     changes=c.execute("SELECT COALESCE(SUM(changes),0) s FROM resources WHERE host=?", (host,)).fetchone()["s"]
-    m=_meta(); last_full=m.get("last_full_scan_id")
+    m=_meta(); last_full=m.get("last_full_scan_id"); _ref=m.get("last_full_scanned_at")
     in_last=c.execute("SELECT 1 FROM verdicts WHERE host=? AND scan_id=? LIMIT 1",(host,last_full)).fetchone()
     gone_since=None if in_last else h["last_seen"][:10]
-    sample=[{"resource":x["resource"],"last_verdict":x["last_verdict"]}
-            for x in c.execute("SELECT resource,last_verdict FROM resources WHERE host=? ORDER BY resource LIMIT 5",(host,))]
+    sample=[{"resource":x["resource"],"last_verdict":x["last_verdict"],
+             "verdict_observed_at":x["last_seen"],"verdict_age_days":_age_days(x["last_seen"], _ref),
+             "in_latest_scan":bool(x["in_latest"])}
+            for x in c.execute("""SELECT r.resource resource, r.last_verdict last_verdict, r.last_seen last_seen,
+                                    CASE WHEN il.resource IS NOT NULL THEN 1 ELSE 0 END in_latest
+                             FROM resources r
+                             LEFT JOIN (SELECT DISTINCT resource FROM verdicts WHERE scan_id=?) il ON il.resource=r.resource
+                             WHERE r.host=? ORDER BY r.resource LIMIT 5""",(last_full,host))]
     c.close()
     return _stamp({"found": True, "host": host, "first_seen": h["first_seen"], "last_seen": h["last_seen"],
             "n_resources": h["n_resources"], "n_payable_last_full": h["n_payable_last"],

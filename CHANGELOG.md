@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-27 stale verdicts carry their age (ref #1)
+- payability_verdict, find_endpoints, and host_summary.resources_sample: every row that carries last_verdict now also carries verdict_observed_at (= last_seen) and verdict_age_days (integer days between last_seen and the index scan time). [C1]
+- payability_verdict: when in_latest_scan is false and last_verdict is not PAYABLE, verdict_meaning and remediation are prefixed "Observed on <YYYY-MM-DD>, not re-checked since. May no longer apply. ". [C2]
+- docstrings: find_endpoints and host_summary note that in_latest_scan=false rows carry a verdict from an earlier scan (read verdict_age_days); host_summary also documents that n_resources counts every resource ever seen for the host while current_verdict_mix and n_payable_last_full count only the latest full scan. [C3/C6]
+- find_endpoints docstring documents the limit clamp (max 50); the clamp itself is unchanged. [C4]
+
 ## 2026-09-26 privacy-by-design tool logging
 - Tool log stores only ts, tool, arg_names, arg_lengths, ip_h; rate limiter counts by ip_h; /health.tool_log reports fields and 30 day retention; INSTRUCTIONS gained a one sentence logging disclosure.
 
