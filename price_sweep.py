@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """One-off price sweep: GET each PAYABLE resource (no payment), parse ALL accepts of the 402,
 persist amount/scheme/etc to prices-YYYYMMDD.jsonl. Never writes scans.jsonl."""
-import json, sqlite3, base64, threading, urllib.request, urllib.error, socket
+import json, sqlite3, base64, threading, urllib.request, urllib.error, socket, os
 from concurrent import futures
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from collections import defaultdict, Counter
 
-import os
-DATA_DIR = os.environ.get("WORKBENCH_DATA_DIR", os.environ.get("WORKBENCH_DIR", "."))
-DB=os.environ.get("WORKBENCH_DB", os.path.join(os.environ.get("WORKBENCH_DIR","."), "index.sqlite"))
+# Path overrides (env-var, default = production paths; env-overridable). Same pattern as build_index.py.
+DATA_DIR = os.environ.get("WORKBENCH_DATA_DIR", "/root/payability-observatory/data")
+DB=os.environ.get("WORKBENCH_DB", "/root/workbench-mcp/index.sqlite")
 OUT=os.environ.get("WORKBENCH_PRICES_OUT", os.path.join(DATA_DIR, "prices-sweep.jsonl"))
 UA="nsgoods-observatory/price-sweep (+https://x402.nsgoods.org)"
 TIMEOUT=10; TOTAL_WORKERS=20; PER_HOST=4

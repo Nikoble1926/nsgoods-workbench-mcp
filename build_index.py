@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Rebuild the index.sqlite from the full scans.jsonl (idempotent).
+"""Rebuild /root/workbench-mcp/index.sqlite from the full scans.jsonl (idempotent).
 Read-only over scans.jsonl; writes a fresh sqlite (temp then atomic replace)."""
 import json, sqlite3, os, time
 from urllib.parse import urlparse
 
-import os
-DATA_DIR = os.environ.get("WORKBENCH_DATA_DIR", os.environ.get("WORKBENCH_DIR", "."))
+# Path overrides (env-var, default = production paths so the rebuild unit needs NO env).
+DATA_DIR = os.environ.get("WORKBENCH_DATA_DIR", "/root/payability-observatory/data")
 SCANS = os.environ.get("WORKBENCH_SCANS", os.path.join(DATA_DIR, "scans.jsonl"))
-OUT   = os.environ.get("WORKBENCH_DB", os.path.join(os.environ.get("WORKBENCH_DIR", "."), "index.sqlite"))
+OUT   = os.environ.get("WORKBENCH_DB", "/root/workbench-mcp/index.sqlite")
 TMP   = OUT + ".tmp"
 
 def host_of(res): 
@@ -35,6 +35,16 @@ def main():
     scan_time = {}   # scan_id -> scanned_at (max)
     n=0
     vbuf=[]
+    def _s(v):
+        return v if (v is None or isinstance(v,str)) else json.dumps(v)
+    def _first_accept(items):
+        first=None
+        for a in items:
+            if a.get("amount") is not None: first=a; break
+        if first is None and items: first=items[0]
+        return first
+    seen_hist=set(); nhist=0
+    price_best={}   # resource -> (observed_at, prices-insert-tuple), greatest observed_at wins
     for line in open(SCANS, errors="replace"):
         line=line.strip()
         if not line: continue
@@ -48,6 +58,23 @@ def main():
         pn=json.dumps(d.get("payable_networks") or [])
         opt=json.dumps(d.get("options") or [])
         vbuf.append((sid,at,r,h,v,pn,opt)); n+=1
+        # scan price ingest: records whose options carry an amount (>=2026-09-17 in practice)
+        opts_list=d.get("options") or []
+        if any((o.get("amount") not in (None,"")) for o in opts_list):
+            for o in opts_list:
+                k=(r, at, _s(o.get("network")), _s(o.get("asset")))
+                if k in seen_hist: continue
+                seen_hist.add(k)
+                db.execute("INSERT INTO price_history VALUES(?,?,?,?,?,?)",
+                    (r, at, _s(o.get("network")), _s(o.get("asset")), _s(o.get("amount")), "scan"))
+                nhist+=1
+            fa=_first_accept(opts_list)
+            if fa is not None:
+                cur_at=price_best.get(r,(None,))[0]
+                if cur_at is None or (at or "")>cur_at:
+                    price_best[r]=(at, (r, _s(fa.get("scheme")), _s(fa.get("network")), _s(fa.get("asset")),
+                                        _s(fa.get("amount")), _s(fa.get("pay_to")), fa.get("max_timeout_seconds"),
+                                        len(opts_list), at, "scan"))
         if len(vbuf)>=5000:
             db.executemany("INSERT INTO verdicts VALUES(?,?,?,?,?,?,?)", vbuf); vbuf=[]
         if sid and at: scan_time[sid]=max(scan_time.get(sid,""), at)
@@ -90,15 +117,13 @@ def main():
     db.execute("INSERT INTO meta VALUES('built_at',?)",(scan_time.get(last_full,""),))  # deterministic
     db.execute("CREATE INDEX ix_v_res ON verdicts(resource)")
     db.execute("CREATE INDEX ix_v_host ON verdicts(host)")
-    # ---- prices + price_history from the newest prices-*.jsonl sweep ----
+    # ---- prices + price_history from ALL prices-*.jsonl sweeps (oldest->newest) ----
+    # NOTE: scan-sourced price_history rows were already ingested in the scans loop above,
+    # sharing the same seen_hist dedup set and price_best (greatest observed_at wins).
     import glob as _glob
     pfiles=sorted(_glob.glob(os.path.join(DATA_DIR, "prices-*.jsonl")))
-    seen_hist=set(); npr=0; nhist=0
-    def _s(v):
-        return v if (v is None or isinstance(v,str)) else json.dumps(v)
-    if pfiles:
-        newest=pfiles[-1]
-        for line in open(newest, errors="replace"):
+    for pf in pfiles:
+        for line in open(pf, errors="replace"):
             line=line.strip()
             if not line: continue
             try: d=json.loads(line)
@@ -113,20 +138,27 @@ def main():
                 db.execute("INSERT INTO price_history VALUES(?,?,?,?,?,?)",
                     (res, oat, _s(a.get("network")), _s(a.get("asset")), _s(a.get("amount")), "sweep"))
                 nhist+=1
-            # prices: FIRST accept that has an amount, else first accept
-            first=None
-            for a in acc:
-                if a.get("amount") is not None: first=a; break
-            if first is None and acc: first=acc[0]
-            if first is not None:
-                db.execute("INSERT OR REPLACE INTO prices VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (res, _s(first.get("scheme")), _s(first.get("network")), _s(first.get("asset")),
-                     _s(first.get("amount")), _s(first.get("pay_to")), first.get("max_timeout_seconds"),
-                     len(acc), oat, "sweep"))
-                npr+=1
-    db.execute("INSERT OR REPLACE INTO meta VALUES('prices_source', ?)", (pfiles[-1] if pfiles else "",))
+            # prices candidate: FIRST accept with an amount, else first accept; keep greatest observed_at
+            fa=_first_accept(acc)
+            if fa is not None:
+                cur_at=price_best.get(res,(None,))[0]
+                if cur_at is None or (oat or "")>cur_at:
+                    price_best[res]=(oat, (res, _s(fa.get("scheme")), _s(fa.get("network")), _s(fa.get("asset")),
+                                          _s(fa.get("amount")), _s(fa.get("pay_to")), fa.get("max_timeout_seconds"),
+                                          len(acc), oat, "sweep"))
+    # write prices = the greatest-observed_at observation per resource (across scan + sweep)
+    npr=0
+    for res,(oat,tup) in price_best.items():
+        db.execute("INSERT OR REPLACE INTO prices VALUES(?,?,?,?,?,?,?,?,?,?)", tup)
+        npr+=1
+    ph_from=db.execute("SELECT MIN(observed_at) FROM price_history").fetchone()[0]
+    ph_to=db.execute("SELECT MAX(observed_at) FROM price_history").fetchone()[0]
+    db.execute("INSERT OR REPLACE INTO meta VALUES('prices_source', ?)",
+               ("scan+sweep: %s + %s" % (last_full, (pfiles[-1] if pfiles else "")),))
     db.execute("INSERT OR REPLACE INTO meta VALUES('n_prices', ?)", (str(npr),))
     db.execute("INSERT OR REPLACE INTO meta VALUES('n_price_history', ?)", (str(nhist),))
+    db.execute("INSERT OR REPLACE INTO meta VALUES('price_history_from', ?)", (ph_from or "",))
+    db.execute("INSERT OR REPLACE INTO meta VALUES('price_history_to', ?)", (ph_to or "",))
     db.execute("CREATE INDEX ix_ph_res ON price_history(resource)")
     db.commit(); db.close()
     os.replace(TMP, OUT)

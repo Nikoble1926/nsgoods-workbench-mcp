@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-28 full-file harmonisation
+- build_index.py: repo now carries the deployed price logic (scan-loop price_history ingest, all prices-*.jsonl sweeps, price_best greatest-observed_at wins, price_history_from/to meta), plus env-var path overrides defaulting to production paths (WORKBENCH_DATA_DIR/WORKBENCH_SCANS/WORKBENCH_DB); rebuild output is byte-identical (verified offline).
+- price_sweep.py: same env-var path pattern; defaults DATA_DIR=/root/payability-observatory/data, DB=/root/workbench-mcp/index.sqlite, OUT=$DATA_DIR/prices-sweep.jsonl.
+- tools/toollog_prune.py: added (30-day tool-log retention prune, atomic replace; used by workbench-toollog-prune.timer).
+- Dockerfile: pin WORKBENCH_DATA_DIR=/app and WORKBENCH_DB=/app/index.sqlite so the image keeps working with the new production-path defaults.
+
 ## 2026-09-27 stale verdicts carry their age (ref #1)
 - payability_verdict, find_endpoints, and host_summary.resources_sample: every row that carries last_verdict now also carries verdict_observed_at (= last_seen) and verdict_age_days (integer days between last_seen and the index scan time). [C1]
 - payability_verdict: when in_latest_scan is false and last_verdict is not PAYABLE, verdict_meaning and remediation are prefixed "Observed on <YYYY-MM-DD>, not re-checked since. May no longer apply. ". [C2]
