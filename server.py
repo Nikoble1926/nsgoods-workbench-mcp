@@ -77,6 +77,19 @@ def _age_days(last_seen, ref_iso):
     except Exception:
         return None
 
+def _verdict_since(c, resource, last_verdict):
+    """scanned_at of the oldest observation in the unbroken newest run of last_verdict for this
+    resource (gaps between scans do not break the run; a single observation -> its scanned_at).
+    Uses the ix_v_res index; one query per row."""
+    rows=c.execute("SELECT scanned_at, verdict FROM verdicts WHERE resource=? ORDER BY scanned_at DESC",
+                   (resource,)).fetchall()
+    if not rows: return None
+    since=rows[0]["scanned_at"]
+    for _r in rows:
+        if _r["verdict"]==last_verdict: since=_r["scanned_at"]
+        else: break
+    return since
+
 # ---- manifest cache (5 min) ----
 _mc = {"t":0,"d":None,"at":None}
 def _manifest():
@@ -206,7 +219,9 @@ mcp._mcp_server.version = "1.0.0"
 @mcp.tool(title="Payability verdict", annotations=_RO)
 def payability_verdict(url: str) -> dict:
     """Latest payability observation for one exact resource URL (path and query included), with the
-    meaning of the verdict, remediation if it cannot be paid, and the per-network options seen."""
+    meaning of the verdict, remediation if it cannot be paid, and the per-network options seen.
+    last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
+    verdict was first observed in the unbroken run that leads to it."""
     c=_db()
     base=(url or "").strip()
     cands=[base]
@@ -230,6 +245,7 @@ def payability_verdict(url: str) -> dict:
     _m=_meta(); latest_scan=_m.get("last_full_scan_id"); _ref=_m.get("last_full_scanned_at")
     in_latest=bool(c.execute("SELECT 1 FROM verdicts WHERE resource=? AND scan_id=? LIMIT 1",
                              (matched, latest_scan)).fetchone())
+    _since=_verdict_since(c, matched, r["last_verdict"])
     c.close()
     opts=[]
     if row and row["options"]:
@@ -244,6 +260,7 @@ def payability_verdict(url: str) -> dict:
             "last_verdict": r["last_verdict"], "verdict_meaning": meaning, "remediation": remediation,
             "first_seen": r["first_seen"], "last_seen": r["last_seen"],
             "verdict_observed_at": _obs, "verdict_age_days": _age,
+            "last_checked_at": _obs, "verdict_since": _since,
             "last_scan_id": r["last_scan_id"], "verdict_changes": r["changes"],
             "in_latest_scan": in_latest, "options": opts, "price": _price(matched)}
     if not in_latest:
@@ -256,7 +273,9 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "
     latest verdict, plus the total match count. Use this first when you do not know the exact resource URL.
     Rows with in_latest_scan=false carry a verdict from an earlier scan; read verdict_age_days.
     Optional network filter (for example eip155:8453 or solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp) and
-    sort=price for the cheapest first."""
+    sort=price for the cheapest first.
+    last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
+    verdict was first observed in the unbroken run that leads to it."""
     query=(query or "").strip()
     if not query: return {"note": "give a host or URL fragment"}
     limit=max(1, min(int(limit or 25), 50))
@@ -304,6 +323,12 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "
         eps.sort(key=lambda e:e["_pk"])
     eps=eps[:limit]
     for e in eps: e.pop("_pk", None)
+    if eps:
+        c=_db()
+        for e in eps:
+            e["last_checked_at"]=e["last_seen"]
+            e["verdict_since"]=_verdict_since(c, e["resource"], e["last_verdict"])
+        c.close()
     out={"query": query, "total_matches": total, "returned": len(eps), "endpoints": eps,
          "filters": {"network": network or None, "sort": sort or None}}
     if total==0:
@@ -359,7 +384,9 @@ def host_summary(host: str) -> dict:
     """Summary for a host (no time series): first/last seen, current verdict mix, n_resources, total
     verdict changes, gone_since if absent from the latest full scan, and a small resources_sample.
     Sample rows with in_latest_scan=false carry a verdict from an earlier scan; read verdict_age_days.
-    n_resources counts every resource ever seen for this host; current_verdict_mix and n_payable_last_full count only the latest full scan."""
+    n_resources counts every resource ever seen for this host; current_verdict_mix and n_payable_last_full count only the latest full scan.
+    last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
+    verdict was first observed in the unbroken run that leads to it."""
     host=_norm_host(host)
     c=_db(); h=c.execute("SELECT * FROM hosts WHERE host=?", (host,)).fetchone()
     if not h: c.close(); _log_miss("host_summary", host); return {"found": False, "host": host, "note": "host not in catalogue"}
@@ -369,6 +396,7 @@ def host_summary(host: str) -> dict:
     gone_since=None if in_last else h["last_seen"][:10]
     sample=[{"resource":x["resource"],"last_verdict":x["last_verdict"],
              "verdict_observed_at":x["last_seen"],"verdict_age_days":_age_days(x["last_seen"], _ref),
+             "last_checked_at":x["last_seen"],"verdict_since":_verdict_since(c, x["resource"], x["last_verdict"]),
              "in_latest_scan":bool(x["in_latest"])}
             for x in c.execute("""SELECT r.resource resource, r.last_verdict last_verdict, r.last_seen last_seen,
                                     CASE WHEN il.resource IS NOT NULL THEN 1 ELSE 0 END in_latest

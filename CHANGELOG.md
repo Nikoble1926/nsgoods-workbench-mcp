@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-09-29 last_checked_at and verdict_since (ref #1)
+- payability_verdict, find_endpoints rows, and host_summary.resources_sample now also carry last_checked_at (= verdict_observed_at / last_seen) and verdict_since (the scanned_at when the current verdict was first observed in the unbroken newest run, derived at query time from the verdicts history; gaps between scans do not break the run). verdict_observed_at is unchanged. Computed with one indexed query per returned row (max 50); no build_index change, no rebuild.
+
 ## 2026-09-28 full-file harmonisation
 - build_index.py: repo now carries the deployed price logic (scan-loop price_history ingest, all prices-*.jsonl sweeps, price_best greatest-observed_at wins, price_history_from/to meta), plus env-var path overrides defaulting to production paths (WORKBENCH_DATA_DIR/WORKBENCH_SCANS/WORKBENCH_DB); rebuild output is byte-identical (verified offline).
 - price_sweep.py: same env-var path pattern; defaults DATA_DIR=/root/payability-observatory/data, DB=/root/workbench-mcp/index.sqlite, OUT=$DATA_DIR/prices-sweep.jsonl.
