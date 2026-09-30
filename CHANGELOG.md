@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-30 weekly reprobe of stale non-PAYABLE rows (ref #1)
+- The server side: a separate weekly reprobe scan (reprobe-<ts> scan ids) refreshes rows that dropped out of the CDP Bazaar, only non-PAYABLE, oldest first, up to 1,500 per week; latest full scan numbers unchanged.
+- find_endpoints and host_summary descriptions and INSTRUCTIONS updated to say so.
+
 ## 2026-09-29 last_checked_at and verdict_since (ref #1)
 - payability_verdict, find_endpoints rows, and host_summary.resources_sample now also carry last_checked_at (= verdict_observed_at / last_seen) and verdict_since (the scanned_at when the current verdict was first observed in the unbroken newest run, derived at query time from the verdicts history; gaps between scans do not break the run). verdict_observed_at is unchanged. Computed with one indexed query per returned row (max 50); no build_index change, no rebuild.
 

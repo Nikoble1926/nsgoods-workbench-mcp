@@ -86,6 +86,8 @@ A live `find_endpoints("erc20-balance", 2)` call, trimmed to two rows:
 ## Data and freshness
 Index is rebuilt after each weekly full scan (14,652 resources, 1,971 hosts, 13,146 payable as of 13 September 2026). Prices come from a sweep of the 402 challenges (10,958 endpoints priced, median 0.01 USDC, 16 September 2026). A per endpoint sample with a GET only re-probe outcome per row is published under CC BY 4.0: https://x402.nsgoods.org/proof/payability-sample-2026-09-13.json
 
+Resources that are no longer in the latest full CDP Bazaar scan are re-probed weekly in a separate reprobe scan: only non-PAYABLE rows, oldest first, up to 1,500 per week. Those rows keep in_latest_scan=false and carry their own last_checked_at and verdict_since; the latest full scan numbers (catalogue_stats, /health) do not include them.
+
 ## Run your own
 ````
 python -m venv venv && venv/bin/pip install -r requirements.txt
