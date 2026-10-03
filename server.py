@@ -221,7 +221,10 @@ def payability_verdict(url: str) -> dict:
     """Latest payability observation for one exact resource URL (path and query included), with the
     meaning of the verdict, remediation if it cannot be paid, and the per-network options seen.
     last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
-    verdict was first observed in the unbroken run that leads to it."""
+    verdict was first observed in the unbroken run that leads to it. A scan that did not
+    contain the resource does not break the run, so verdict_since can span weeks nobody
+    measured. How current a row is comes from last_checked_at and in_latest_scan, not from
+    verdict_since alone."""
     c=_db()
     base=(url or "").strip()
     cands=[base]
@@ -275,7 +278,10 @@ def find_endpoints(query: str, limit: int = 25, sort: str = "", network: str = "
     Optional network filter (for example eip155:8453 or solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp) and
     sort=price for the cheapest first.
     last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
-    verdict was first observed in the unbroken run that leads to it."""
+    verdict was first observed in the unbroken run that leads to it. A scan that did not
+    contain the resource does not break the run, so verdict_since can span weeks nobody
+    measured. How current a row is comes from last_checked_at and in_latest_scan, not from
+    verdict_since alone."""
     query=(query or "").strip()
     if not query: return {"note": "give a host or URL fragment"}
     limit=max(1, min(int(limit or 25), 50))
@@ -386,7 +392,10 @@ def host_summary(host: str) -> dict:
     Sample rows with in_latest_scan=false were not in the latest full scan; read last_checked_at for when they were last probed.
     n_resources counts every resource ever seen for this host; current_verdict_mix and n_payable_last_full count only the latest full scan.
     last_checked_at is the last time any scan looked at the resource; verdict_since is when the current
-    verdict was first observed in the unbroken run that leads to it."""
+    verdict was first observed in the unbroken run that leads to it. A scan that did not
+    contain the resource does not break the run, so verdict_since can span weeks nobody
+    measured. How current a row is comes from last_checked_at and in_latest_scan, not from
+    verdict_since alone."""
     host=_norm_host(host)
     c=_db(); h=c.execute("SELECT * FROM hosts WHERE host=?", (host,)).fetchone()
     if not h: c.close(); _log_miss("host_summary", host); return {"found": False, "host": host, "note": "host not in catalogue"}
