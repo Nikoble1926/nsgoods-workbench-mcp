@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-10-11 client connection log
+- A new client_log.jsonl records, per MCP initialize, the user agent, the client name and version and the requested protocol version, and per failed request on /mcp the HTTP status, the JSON-RPC method name, a few request headers and the start of the error. Same daily keyed IP hash and 30 day retention as the tool log, never params or arguments. GET /health lists the fields under client_log. RateLimit and ClientLog now share one client IP helper.
+
 ## 2026-09-30 weekly reprobe of stale non-PAYABLE rows (ref #1)
 - The server side: a separate weekly reprobe scan (reprobe-<ts> scan ids) refreshes rows that dropped out of the CDP Bazaar, only non-PAYABLE, oldest first, up to 1,500 per week; latest full scan numbers unchanged.
 - find_endpoints and host_summary descriptions and INSTRUCTIONS updated to say so.

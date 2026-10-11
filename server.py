@@ -630,7 +630,11 @@ async def health(request):
         "rate_limit_per_ip_per_day":FP_LIMIT,
         "tool_log":{"fields":["ts","tool","arg_names","arg_lengths","ip_h"],
                     "ip":"daily-keyed hash, not reversible after the UTC day",
-                    "args":"names and lengths only","retention_days":30}})
+                    "args":"names and lengths only","retention_days":30},
+        "client_log":{"fields":["ts","kind","ip_h","ua","client_name","client_version","protocol_requested","status","http_method","jsonrpc_method","has_session_id","mcp_protocol_version","accept","content_type","reason"],
+                      "ip":"daily-keyed hash, same as tool_log",
+                      "body":"JSON-RPC method name only; for initialize also clientInfo and protocolVersion; never params or arguments",
+                      "retention_days":30}})
 
 TOOL_LOG = os.environ.get("WORKBENCH_TOOL_LOG")
 def _log_call(tool, ip_h, args):
@@ -660,6 +664,97 @@ def _log_miss(tool, key=None):
     except Exception:
         pass
 
+# --- MCP-CLIENT-LOGGING Phase 2: who connects + why they get 4xx -----------------
+# Privacy mirrors tool_calls.jsonl: ip_h via the SAME source as RateLimit/_log_call
+# (shared _client_ip + _ip_hash), JSON-RPC method NAME only (never params/arguments),
+# session-id PRESENCE only.
+CLIENT_LOG = os.environ.get("WORKBENCH_CLIENT_LOG", "/root/workbench-mcp/client_log.jsonl")
+
+def _client_ip(scope):
+    """Client IP exactly as RateLimit/_log_call see it: first X-Forwarded-For hop
+    (nginx sets XFF=$remote_addr, overwriting any client value), else ASGI client."""
+    xff = None
+    for hk, hv in scope.get("headers", []):
+        if hk == b"x-forwarded-for":
+            xff = hv.decode().split(",")[0].strip()
+    return xff or (scope.get("client") or ["?"])[0]
+
+def _log_client(rec):
+    """Append one client_log line; never raises (log failure must not break a request)."""
+    if not CLIENT_LOG:
+        return
+    try:
+        with open(CLIENT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+class ClientLog:
+    """Outermost ASGI wrapper. Logs each MCP `initialize` (clientInfo + protocol
+    requested) and every HTTP 4xx/5xx on /mcp (status, jsonrpc method name, header
+    diagnostics, error-reason prefix). Never alters status/body/headers and forwards
+    every ASGI event unchanged, so SSE streaming is untouched (only a bounded side-copy
+    of error-response bytes is kept, never withheld). All logging is best-effort."""
+    def __init__(self, app): self.app = app
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != "/mcp":
+            return await self.app(scope, receive, send)
+        hdr = {k.decode().lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        try:
+            iph = _ip_hash(_client_ip(scope))
+        except Exception:
+            iph = None
+        ua = (hdr.get("user-agent") or "")[:120]
+        http_method = scope.get("method")
+        jmethod = init_pv = cname = cver = None
+        receive2 = receive
+        if http_method == "POST":
+            msgs = []; body = b""; more = True
+            while more:
+                mm = await receive(); msgs.append(mm); body += mm.get("body", b""); more = mm.get("more_body", False)
+            try:
+                obj = json.loads(body)
+                if isinstance(obj, dict):
+                    jmethod = obj.get("method")
+                    if jmethod == "initialize":
+                        p = obj.get("params") or {}
+                        init_pv = p.get("protocolVersion")
+                        ci = p.get("clientInfo") or {}
+                        cname = ci.get("name"); cver = ci.get("version")
+            except Exception:
+                pass
+            _it = iter(msgs)
+            async def receive2():
+                try:
+                    return next(_it)
+                except StopIteration:
+                    return await receive()
+        st = {"status": None, "buf": b"", "cap": False}
+        async def send2(ev):
+            t = ev.get("type")
+            if t == "http.response.start":
+                st["status"] = ev.get("status")
+                st["cap"] = ev.get("status", 0) >= 400
+            elif t == "http.response.body" and st["cap"] and len(st["buf"]) < 2048:
+                st["buf"] += (ev.get("body", b"") or b"")[:2048]
+            await send(ev)
+        await self.app(scope, receive2, send2)
+        status = st["status"]
+        try:
+            if jmethod == "initialize":
+                _log_client({"ts": datetime.now(timezone.utc).isoformat(), "kind": "initialize",
+                    "ip_h": iph, "ua": ua, "client_name": cname, "client_version": cver,
+                    "protocol_requested": init_pv, "status": status})
+            if status is not None and status >= 400:
+                _log_client({"ts": datetime.now(timezone.utc).isoformat(), "kind": "http_error",
+                    "ip_h": iph, "ua": ua, "http_method": http_method, "jsonrpc_method": jmethod,
+                    "status": status, "has_session_id": ("mcp-session-id" in hdr),
+                    "mcp_protocol_version": hdr.get("mcp-protocol-version"),
+                    "accept": (hdr.get("accept") or "")[:80], "content_type": hdr.get("content-type"),
+                    "reason": st["buf"].decode("utf-8", "replace")[:160]})
+        except Exception:
+            pass
+
 class RateLimit:
     def __init__(self, app): self.app=app
     async def __call__(self, scope, receive, send):
@@ -672,11 +767,7 @@ class RateLimit:
         try: method=json.loads(body).get("method")
         except Exception: pass
         if method=="tools/call":
-            xff=None
-            for hk,hv in scope.get("headers",[]):
-                if hk==b"x-forwarded-for": xff=hv.decode().split(",")[0].strip()
-            ip=xff or (scope.get("client") or ["?"])[0]
-            iph=_ip_hash(ip)
+            iph=_ip_hash(_client_ip(scope))
             if not rate_ok(iph):
                 await send({"type":"http.response.start","status":429,
                     "headers":[(b"content-type",b"application/json")]})
@@ -696,7 +787,7 @@ class RateLimit:
 
 app = mcp.streamable_http_app()
 app.router.routes.append(Route("/health", health, methods=["GET"]))
-app = RateLimit(app)
+app = ClientLog(RateLimit(app))   # ClientLog outermost: sees final status incl 429/400
 
 if __name__=="__main__":
     import uvicorn
