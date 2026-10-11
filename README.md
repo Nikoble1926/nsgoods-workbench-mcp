@@ -118,11 +118,12 @@ The server creates an empty index on first run if none is present, so tools/list
 This server needs no wallet and no sign in. It keeps a minimal record of tool usage so we can operate and rate limit the service.
 
 - Per tool call we store: timestamp, tool name, the names and lengths of the arguments, and ip_h, a daily keyed hash of the caller IP. We do not store argument values, and we do not store the raw IP or the MCP session id.
+- When a client connects we store: timestamp, ip_h, user agent, the client name and version it reports, and the protocol version it requests. When a request to /mcp fails we store: timestamp, ip_h, user agent, HTTP method and status, the JSON-RPC method name, whether a session id was sent, the MCP-Protocol-Version, Accept and Content-Type headers, and the first 160 characters of the error. Never params or arguments.
 - ip_h is HMAC-SHA256(daily_secret, ip) truncated to 16 hex characters. The secret is random, held only in memory, replaced at each UTC day change and never written down, so after the day ends the hash cannot be linked back to an IP.
 - The same ip_h drives the free limit of 300 tool calls per caller per day. If the server restarts during a UTC day, a new secret is generated, so the counter restarts for everyone for the rest of that day.
 - Records are deleted after 30 days. Records written before 26 September 2026 used a fuller format (caller IP, session id and the first 80 characters of each argument); they are deleted on the same schedule, the last of them by 26 October 2026.
 
-The current field list and retention are also reported live at GET /health under tool_log.
+The current field lists and retention are also reported live at GET /health under tool_log and client_log.
 
 ## Verification
 Signed nsgoods responses use EIP-191 over canonical JSON (sorted keys, compact separators, ASCII escaped, signature and signed_by removed before hashing). The verify_signature tool checks the recovered address against the signers in https://x402.nsgoods.org/proof/index.json
