@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-16
+
+Documentation only, no behaviour change.
+
+The server instructions now state that the weekly reprobe checks stale non PAYABLE rows first, by design: a stale negative misrepresents a working seller to every reader, while a stale positive costs one failed attempt. A PAYABLE row that leaves the seed keeps its verdict and last_seen until the seed brings it back; read verdict_age_days and last_checked_at for its age.
+
+The descriptions of payability_verdict, find_endpoints and host_summary name last_checked_at as the currency claim: the last time any scan or reprobe looked at the resource. in_latest_scan means only that the resource was in the latest full scan; a row reprobed the same day can carry in_latest_scan=false and still be current.
+
+Both changes close issue #1 (minia2auk), reproduced with 15/15 live reprobes on the reporter's side.
+
 ## 2026-10-11 client connection log
 - A new client_log.jsonl records, per MCP initialize, the user agent, the client name and version and the requested protocol version, and per failed request on /mcp the HTTP status, the JSON-RPC method name, a few request headers and the start of the error. Same daily keyed IP hash and 30 day retention as the tool log, never params or arguments. GET /health lists the fields under client_log. RateLimit and ClientLog now share one client IP helper.
 
